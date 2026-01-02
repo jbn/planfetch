@@ -7,11 +7,26 @@ authors = [
     { name = "John B Nelson", email = "jbn@abreka.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "boto3>=1.42.19",
+    "filelock>=3.20.2",
+    "numpy>=2.4.0",
+    "torch>=2.9.1",
+]
 
 [project.scripts]
 planfetch = "planfetch:main"
 
+[project.optional-dependencies]
+lightning = [
+    "pytorch-lightning>=2.6.0",
+]
+
 [build-system]
 requires = ["uv_build>=0.9.17,<0.10.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

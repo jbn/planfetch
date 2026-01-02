@@ -6,7 +6,7 @@ from typing import Dict, Tuple
 import numpy as np
 import pytest
 
-import s3_prefetching as m
+from planfetch import s3_prefetching as m
 
 
 class FakeS3Client:
