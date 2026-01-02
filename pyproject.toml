@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "John B Nelson", email = "jbn@abreka.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.42.19",
     "filelock>=3.20.2",
