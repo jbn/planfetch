@@ -1,0 +1,324 @@
+# S3 prefetch + sliding-window NVMe cache for PyTorch DataLoader
+
+This repo-style design keeps things **PyTorch-native** while hiding S3 latency:
+
+- **DataLoader owns ordering** via a `BatchSampler` (so no `shuffle=True`).
+- A **PlanProvider** precomputes an epoch’s **batch plan** (shuffle, stratified batches, curriculum, etc.).
+- A **PrefetchCoordinator** uses the same plan to download “what’s next” to NVMe and prune a moving window.
+- The **Dataset stays responsible for decoding + transforms**; it just asks the cache for a local path.
+
+It’s designed to be minimally intrusive:
+
+- **Plain torch**: one line per epoch (`controller.set_epoch(epoch)`), then `for batch in loader: ...`
+- **PyTorch Lightning**: a small callback calls `controller.set_epoch(...)` at the right hook.
+
+---
+
+## Why a PlanView (the “plan view” upgrade)
+
+Instead of a Python list of batches (lots of Python-object overhead), a **PlanView** stores a dense matrix:
+
+- shape: `[num_batches, batch_size]`
+- dtype: `np.int64`
+
+Benefits:
+
+- **Memory**: 2,000,000 indices as `int64` is ~16 MB; as Python ints it’s typically hundreds of MB.
+- **Speed**: fast iteration and fast window queries for prefetching (`plan.range_flat(lo, hi)`).
+
+---
+
+## Memory-thrifty stratification upgrade
+
+A naive stratifier often does per epoch:
+
+- for each class pool:
+  - copy the class’s indices
+  - shuffle the copy
+
+If a class pool has millions of items, that copy-and-shuffle becomes expensive.
+
+`StreamingStratifiedBatchPlanProvider` avoids this by:
+
+- building per-class pools once: `np.where(labels == class)`
+- generating an epoch stream for each class using a compact **modular permutation** (no pool copies)
+- composing batches from those class streams
+
+Tradeoff: it’s not a perfect Fisher–Yates shuffle over each class pool, but it is deterministic, “random-looking”, and very memory friendly.
+
+---
+
+## Core components
+
+### `SharedDiskCache`
+- Downloads `s3://bucket/key` objects into a deterministic path under `cache_dir`
+- Uses:
+  - **tmp → atomic rename** (no partial files)
+  - **file locks** to dedupe across DataLoader worker processes
+  - a **ThreadPoolExecutor** to run concurrent boto3 downloads
+- Pruning modes:
+  - `mode="window"`: delete anything not in the current keep-set (best for huge datasets)
+  - `mode="pressure"`: evict only if `total_bytes > max_bytes` (LRU-ish by last access)
+
+### `PlanProvider` → `PlanView`
+- Produces a batch-aware plan for the epoch
+- Examples:
+  - `ShuffleOncePerEpochPlanProvider`: default shuffle
+  - `StreamingStratifiedBatchPlanProvider`: per-batch class stratification
+  - `SequentialPlanProvider`: deterministic val/test
+
+### `PlanBatchSampler`
+- A BatchSampler backed by PlanView, keeping ordering in DataLoader land.
+
+### `PrefetchCoordinator`
+- Keeps a sliding window of batches on NVMe:
+  - keep batches: `[i - B_back, i + B_ahead)`
+- Prefetches ahead and periodically prunes outside-window files.
+
+### `PrefetchingLoader`
+- Wraps a PyTorch DataLoader and calls `prefetch.on_batch_yielded(batch_idx)` automatically to avoid custom loops.
+
+### `PrefetchController`
+- One method per epoch: `controller.set_epoch(epoch)`
+- Updates sampler plan and primes prefetch.
+
+---
+
+## Plain PyTorch usage
+
+Assume you saved the code as `s3_prefetching.py`.
+
+### 1) Load CSV index
+Your CSV must contain:
+- an S3 path column (e.g. `s3_path`)
+- a class label column (e.g. `class_id`)
+
+```python
+import numpy as np
+from PIL import Image
+import s3_prefetching as s3p
+
+train_uris, train_labels = s3p.load_index_csv(
+    "train.csv",
+    s3_uri_col="s3_path",
+    class_col="class_id",
+)
+```
+
+### 2) Configure cache on NVMe
+```python
+nvme_bytes = 1_000_000_000_000  # example: 1 TB
+cache = s3p.SharedDiskCache(
+    "/mnt/nvme/s3cache_train",
+    max_bytes=int(0.8 * nvme_bytes),   # leave headroom
+    download_threads=64,
+    s3_max_pool_connections=256,
+    min_age_seconds_before_delete=2.0,
+)
+```
+
+### 3) Dataset does decode/transforms; cache does fetching
+```python
+def image_loader(path: str):
+    return Image.open(path).convert("RGB")
+
+train_ds = s3p.S3PathDataset(
+    train_uris,
+    train_labels,
+    cache=cache,
+    image_loader=image_loader,
+    transform=None,  # put torchvision transforms here
+)
+```
+
+### 4) Choose a plan provider (stratified batches)
+```python
+batch_size = 256
+
+plan_provider = s3p.StreamingStratifiedBatchPlanProvider(
+    np.asarray(train_labels),
+    batch_size=batch_size,
+    epoch_samples=2_000_000,  # samples per epoch
+    seed=123,
+)
+```
+
+### 5) Build the prefetching DataLoader
+```python
+train_loader, train_controller = s3p.build_prefetching_dataloader(
+    dataset=train_ds,
+    s3_uris=train_uris,
+    plan_provider=plan_provider,
+    cache=cache,
+    num_workers=8,
+    batches_ahead=200,
+    batches_back=4,
+    prune_every=10,
+    prune_mode="window",
+    # With num_workers>0, scan pruning is most robust across processes:
+    prune_backend="scan",
+    persistent_workers=True,
+    pin_memory=True,
+)
+```
+
+### 6) Training loop (minimal intrusion)
+```python
+for epoch in range(10):
+    train_controller.set_epoch(epoch)
+
+    for images, y in train_loader:
+        # training step
+        pass
+```
+
+---
+
+## Val/test loaders (same pattern)
+
+You can reuse the exact same wrapper pattern. Typically you swap PlanProvider and tune the window smaller.
+
+### Sequential val/test plan
+```python
+val_uris, val_labels = s3p.load_index_csv("val.csv", s3_uri_col="s3_path", class_col="class_id")
+
+val_cache = s3p.SharedDiskCache(
+    "/mnt/nvme/s3cache_val",
+    max_bytes=int(0.2 * nvme_bytes),
+    download_threads=32,
+)
+
+val_ds = s3p.S3PathDataset(val_uris, val_labels, cache=val_cache, image_loader=image_loader)
+
+val_provider = s3p.SequentialPlanProvider(n=len(val_ds), batch_size=256)
+
+val_loader, val_controller = s3p.build_prefetching_dataloader(
+    dataset=val_ds,
+    s3_uris=val_uris,
+    plan_provider=val_provider,
+    cache=val_cache,
+    num_workers=4,
+    batches_ahead=50,
+    batches_back=2,
+    prune_every=20,
+    prune_mode="window",
+    prune_backend="scan",
+)
+
+val_controller.set_epoch(0)
+for batch in val_loader:
+    pass
+```
+
+### Keeping val cached across runs
+If val/test repeats frequently and you want it warm:
+- use a separate cache directory
+- use `prune_mode="pressure"` so it only evicts when over budget
+
+---
+
+## PyTorch Lightning usage
+
+Two patterns work well:
+
+1) **DataModule returns the PrefetchingLoader** for each split  
+2) A **Callback** calls `controller.set_epoch(...)` at the right hooks
+
+### Example (DataModule + Callback)
+
+```python
+import numpy as np
+from PIL import Image
+import pytorch_lightning as pl
+import s3_prefetching as s3p
+
+def image_loader(path: str):
+    return Image.open(path).convert("RGB")
+
+class MyDataModule(pl.LightningDataModule):
+    def __init__(self, train_csv: str, val_csv: str, nvme_bytes: int):
+        super().__init__()
+        self.train_csv = train_csv
+        self.val_csv = val_csv
+        self.nvme_bytes = nvme_bytes
+
+    def setup(self, stage=None):
+        self.train_uris, self.train_labels = s3p.load_index_csv(self.train_csv, s3_uri_col="s3_path", class_col="class_id")
+        self.val_uris, self.val_labels = s3p.load_index_csv(self.val_csv, s3_uri_col="s3_path", class_col="class_id")
+
+        self.train_cache = s3p.SharedDiskCache("/mnt/nvme/s3cache_train", max_bytes=int(0.8 * self.nvme_bytes), download_threads=64)
+        self.val_cache   = s3p.SharedDiskCache("/mnt/nvme/s3cache_val",   max_bytes=int(0.2 * self.nvme_bytes), download_threads=32)
+
+        self.train_ds = s3p.S3PathDataset(self.train_uris, self.train_labels, cache=self.train_cache, image_loader=image_loader)
+        self.val_ds   = s3p.S3PathDataset(self.val_uris,   self.val_labels,   cache=self.val_cache,   image_loader=image_loader)
+
+        self.train_provider = s3p.StreamingStratifiedBatchPlanProvider(
+            np.asarray(self.train_labels), batch_size=256, epoch_samples=2_000_000, seed=123
+        )
+        self.val_provider = s3p.SequentialPlanProvider(n=len(self.val_ds), batch_size=256)
+
+        self.train_loader, self.train_controller = s3p.build_prefetching_dataloader(
+            dataset=self.train_ds,
+            s3_uris=self.train_uris,
+            plan_provider=self.train_provider,
+            cache=self.train_cache,
+            num_workers=8,
+            batches_ahead=200,
+            batches_back=4,
+            prune_every=10,
+            prune_mode="window",
+            prune_backend="scan",
+        )
+        self.val_loader, self.val_controller = s3p.build_prefetching_dataloader(
+            dataset=self.val_ds,
+            s3_uris=self.val_uris,
+            plan_provider=self.val_provider,
+            cache=self.val_cache,
+            num_workers=4,
+            batches_ahead=50,
+            batches_back=2,
+            prune_every=20,
+            prune_mode="window",
+            prune_backend="scan",
+        )
+
+    def train_dataloader(self):
+        return self.train_loader
+
+    def val_dataloader(self):
+        return self.val_loader
+
+datamodule = MyDataModule("train.csv", "val.csv", nvme_bytes=1_000_000_000_000)
+
+callback = s3p.S3PrefetchLightningCallback(
+    train_controller=datamodule.train_controller,
+    val_controller=datamodule.val_controller,
+)
+
+trainer = pl.Trainer(callbacks=[callback], max_epochs=10)
+# trainer.fit(model, datamodule=datamodule)
+```
+
+---
+
+## Knob guide (your numbers: 200 KB avg, 2M samples/epoch, NVMe)
+
+Average epoch payload:
+- 2,000,000 × 200 KB ≈ ~400 GB (decimal) ≈ ~372 GiB
+
+Good starting knobs:
+- `batches_ahead`: 200
+- `batches_back`: 4
+- `download_threads`: 64 (try 128 if the network + S3 can sustain)
+- `max_bytes`: 70–85% of NVMe
+- `prune_backend`: `"scan"` when `num_workers > 0` for correctness on shared disk
+
+---
+
+## Notes on future DDP
+
+When you move to DDP later:
+- make cache directories rank-specific:
+  - `/mnt/nvme/s3cache/run_{id}/rank_{rank}/...`
+- each rank has its own DataLoader, plan, and prefetch controller
+- dedupe across ranks is possible but usually not worth the extra coordination
