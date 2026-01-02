@@ -86,8 +86,6 @@ Tradeoff: it’s not a perfect Fisher–Yates shuffle over each class pool, but 
 
 ## Plain PyTorch usage
 
-Assume you saved the code as `s3_prefetching.py`.
-
 ### 1) Load CSV index
 Your CSV must contain:
 - an S3 path column (e.g. `s3_path`)
@@ -96,9 +94,9 @@ Your CSV must contain:
 ```python
 import numpy as np
 from PIL import Image
-import s3_prefetching as s3p
+import planfetch as pf
 
-train_uris, train_labels = s3p.load_index_csv(
+train_uris, train_labels = pf.load_index_csv(
     "train.csv",
     s3_uri_col="s3_path",
     class_col="class_id",
@@ -108,7 +106,7 @@ train_uris, train_labels = s3p.load_index_csv(
 ### 2) Configure cache on NVMe
 ```python
 nvme_bytes = 1_000_000_000_000  # example: 1 TB
-cache = s3p.SharedDiskCache(
+cache = pf.SharedDiskCache(
     "/mnt/nvme/s3cache_train",
     max_bytes=int(0.8 * nvme_bytes),   # leave headroom
     download_threads=64,
@@ -122,7 +120,7 @@ cache = s3p.SharedDiskCache(
 def image_loader(path: str):
     return Image.open(path).convert("RGB")
 
-train_ds = s3p.S3PathDataset(
+train_ds = pf.S3PathDataset(
     train_uris,
     train_labels,
     cache=cache,
@@ -135,7 +133,7 @@ train_ds = s3p.S3PathDataset(
 ```python
 batch_size = 256
 
-plan_provider = s3p.StreamingStratifiedBatchPlanProvider(
+plan_provider = pf.StreamingStratifiedBatchPlanProvider(
     np.asarray(train_labels),
     batch_size=batch_size,
     epoch_samples=2_000_000,  # samples per epoch
@@ -145,7 +143,7 @@ plan_provider = s3p.StreamingStratifiedBatchPlanProvider(
 
 ### 5) Build the prefetching DataLoader
 ```python
-train_loader, train_controller = s3p.build_prefetching_dataloader(
+train_loader, train_controller = pf.build_prefetching_dataloader(
     dataset=train_ds,
     s3_uris=train_uris,
     plan_provider=plan_provider,
@@ -180,19 +178,19 @@ You can reuse the exact same wrapper pattern. Typically you swap PlanProvider an
 
 ### Sequential val/test plan
 ```python
-val_uris, val_labels = s3p.load_index_csv("val.csv", s3_uri_col="s3_path", class_col="class_id")
+val_uris, val_labels = pf.load_index_csv("val.csv", s3_uri_col="s3_path", class_col="class_id")
 
-val_cache = s3p.SharedDiskCache(
+val_cache = pf.SharedDiskCache(
     "/mnt/nvme/s3cache_val",
     max_bytes=int(0.2 * nvme_bytes),
     download_threads=32,
 )
 
-val_ds = s3p.S3PathDataset(val_uris, val_labels, cache=val_cache, image_loader=image_loader)
+val_ds = pf.S3PathDataset(val_uris, val_labels, cache=val_cache, image_loader=image_loader)
 
-val_provider = s3p.SequentialPlanProvider(n=len(val_ds), batch_size=256)
+val_provider = pf.SequentialPlanProvider(n=len(val_ds), batch_size=256)
 
-val_loader, val_controller = s3p.build_prefetching_dataloader(
+val_loader, val_controller = pf.build_prefetching_dataloader(
     dataset=val_ds,
     s3_uris=val_uris,
     plan_provider=val_provider,
@@ -230,7 +228,7 @@ Two patterns work well:
 import numpy as np
 from PIL import Image
 import pytorch_lightning as pl
-import s3_prefetching as s3p
+import planfetch as pf
 
 def image_loader(path: str):
     return Image.open(path).convert("RGB")
@@ -243,21 +241,21 @@ class MyDataModule(pl.LightningDataModule):
         self.nvme_bytes = nvme_bytes
 
     def setup(self, stage=None):
-        self.train_uris, self.train_labels = s3p.load_index_csv(self.train_csv, s3_uri_col="s3_path", class_col="class_id")
-        self.val_uris, self.val_labels = s3p.load_index_csv(self.val_csv, s3_uri_col="s3_path", class_col="class_id")
+        self.train_uris, self.train_labels = pf.load_index_csv(self.train_csv, s3_uri_col="s3_path", class_col="class_id")
+        self.val_uris, self.val_labels = pf.load_index_csv(self.val_csv, s3_uri_col="s3_path", class_col="class_id")
 
-        self.train_cache = s3p.SharedDiskCache("/mnt/nvme/s3cache_train", max_bytes=int(0.8 * self.nvme_bytes), download_threads=64)
-        self.val_cache   = s3p.SharedDiskCache("/mnt/nvme/s3cache_val",   max_bytes=int(0.2 * self.nvme_bytes), download_threads=32)
+        self.train_cache = pf.SharedDiskCache("/mnt/nvme/s3cache_train", max_bytes=int(0.8 * self.nvme_bytes), download_threads=64)
+        self.val_cache   = pf.SharedDiskCache("/mnt/nvme/s3cache_val",   max_bytes=int(0.2 * self.nvme_bytes), download_threads=32)
 
-        self.train_ds = s3p.S3PathDataset(self.train_uris, self.train_labels, cache=self.train_cache, image_loader=image_loader)
-        self.val_ds   = s3p.S3PathDataset(self.val_uris,   self.val_labels,   cache=self.val_cache,   image_loader=image_loader)
+        self.train_ds = pf.S3PathDataset(self.train_uris, self.train_labels, cache=self.train_cache, image_loader=image_loader)
+        self.val_ds   = pf.S3PathDataset(self.val_uris,   self.val_labels,   cache=self.val_cache,   image_loader=image_loader)
 
-        self.train_provider = s3p.StreamingStratifiedBatchPlanProvider(
+        self.train_provider = pf.StreamingStratifiedBatchPlanProvider(
             np.asarray(self.train_labels), batch_size=256, epoch_samples=2_000_000, seed=123
         )
-        self.val_provider = s3p.SequentialPlanProvider(n=len(self.val_ds), batch_size=256)
+        self.val_provider = pf.SequentialPlanProvider(n=len(self.val_ds), batch_size=256)
 
-        self.train_loader, self.train_controller = s3p.build_prefetching_dataloader(
+        self.train_loader, self.train_controller = pf.build_prefetching_dataloader(
             dataset=self.train_ds,
             s3_uris=self.train_uris,
             plan_provider=self.train_provider,
@@ -269,7 +267,7 @@ class MyDataModule(pl.LightningDataModule):
             prune_mode="window",
             prune_backend="scan",
         )
-        self.val_loader, self.val_controller = s3p.build_prefetching_dataloader(
+        self.val_loader, self.val_controller = pf.build_prefetching_dataloader(
             dataset=self.val_ds,
             s3_uris=self.val_uris,
             plan_provider=self.val_provider,
@@ -290,7 +288,7 @@ class MyDataModule(pl.LightningDataModule):
 
 datamodule = MyDataModule("train.csv", "val.csv", nvme_bytes=1_000_000_000_000)
 
-callback = s3p.S3PrefetchLightningCallback(
+callback = pf.S3PrefetchLightningCallback(
     train_controller=datamodule.train_controller,
     val_controller=datamodule.val_controller,
 )
