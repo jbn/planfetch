@@ -203,7 +203,12 @@ class SharedDiskCache:
             backoff = 0.25
             for attempt in range(6):
                 try:
-                    self.s3.download_file(bucket, key, str(tmp))
+                    # Use get_object() instead of download_file() for less overhead
+                    response = self.s3.get_object(Bucket=bucket, Key=key)
+                    with open(tmp, 'wb') as f:
+                        # Read in chunks to avoid holding large objects in memory
+                        for chunk in response['Body'].iter_chunks(chunk_size=1024 * 1024):
+                            f.write(chunk)
                     os.replace(str(tmp), str(dst))  # atomic
                     self._touch(s3_uri, dst)
                     return str(dst)

@@ -65,6 +65,7 @@ Tradeoff: it’s not a perfect Fisher–Yates shuffle over each class pool, but 
 - Examples:
   - `ShuffleOncePerEpochPlanProvider`: default shuffle
   - `StreamingStratifiedBatchPlanProvider`: per-batch class stratification
+  - `BalancedSubsamplingPlanProvider`: exact equal samples per class (for imbalanced datasets)
   - `SequentialPlanProvider`: deterministic val/test
 
 ### `PlanBatchSampler`
@@ -149,6 +150,30 @@ plan_provider = pf.StreamingStratifiedBatchPlanProvider(
     seed=123,
 )
 ```
+
+#### Alternative: Balanced subsampling (for imbalanced datasets)
+If you have class imbalance and want exactly equal samples per class in every batch:
+
+```python
+# Specify samples per class directly (batch_size = samples_per_class * num_classes)
+plan_provider = pf.BalancedSubsamplingPlanProvider(
+    np.asarray(train_labels),
+    samples_per_class=8,  # 8 samples per class per batch
+    epoch_samples=500_000,
+    seed=123,
+)
+
+# Or use from_batch_size() if you prefer to set batch_size
+# (batch_size must be divisible by num_classes)
+plan_provider = pf.BalancedSubsamplingPlanProvider.from_batch_size(
+    np.asarray(train_labels),
+    batch_size=256,
+    epoch_samples=500_000,
+    seed=123,
+)
+```
+
+This provider undersamples majority classes and oversamples minority classes to guarantee equal representation.
 
 ### 5) Build the prefetching DataLoader
 ```python
