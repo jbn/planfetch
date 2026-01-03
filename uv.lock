@@ -842,6 +842,7 @@ lightning = [
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "pytorch-lightning" },
 ]
 
 [package.metadata]
@@ -857,7 +858,10 @@ requires-dist = [
 provides-extras = ["lightning"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.0.2" }]
+dev = [
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytorch-lightning", specifier = ">=2.6.0" },
+]
 
 [[package]]
 name = "pluggy"
