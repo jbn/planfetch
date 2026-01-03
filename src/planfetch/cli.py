@@ -294,6 +294,7 @@ def speedtest(
     # Run benchmark
     batch_times: List[float] = []
     total_bytes = 0
+    wall_start = time.perf_counter()
 
     with Progress(
         SpinnerColumn(),
@@ -349,29 +350,30 @@ def speedtest(
 
     # Wait for any remaining downloads
     cache.wait_for_inflight()
+    wall_end = time.perf_counter()
+    wall_time = wall_end - wall_start
 
-    # Compute statistics
+    # Compute statistics using wall-clock time (actual throughput)
     batch_times_arr = np.array(batch_times)
-    total_time = batch_times_arr.sum()
-    avg_batch_time = batch_times_arr.mean()
-    p50 = np.percentile(batch_times_arr, 50)
-    p95 = np.percentile(batch_times_arr, 95)
-    p99 = np.percentile(batch_times_arr, 99)
-    batches_per_sec = num_batches / total_time if total_time > 0 else 0
-    samples_per_sec = (num_batches * batch_size) / total_time if total_time > 0 else 0
+    avg_batch_wait = batch_times_arr.mean()
+    p50_wait = np.percentile(batch_times_arr, 50)
+    p95_wait = np.percentile(batch_times_arr, 95)
+    p99_wait = np.percentile(batch_times_arr, 99)
+    batches_per_sec = num_batches / wall_time if wall_time > 0 else 0
+    samples_per_sec = (num_batches * batch_size) / wall_time if wall_time > 0 else 0
 
     # Display results
     console.print()
     results_table = Table(title="Results", show_header=False)
     results_table.add_column("Metric", style="cyan")
     results_table.add_column("Value", style="green")
-    results_table.add_row("Total time", f"{total_time:.2f} s")
+    results_table.add_row("Total time", f"{wall_time:.2f} s")
     results_table.add_row("Batches/sec", f"{batches_per_sec:.2f}")
     results_table.add_row("Samples/sec", f"{samples_per_sec:.2f}")
-    results_table.add_row("Avg batch time", f"{avg_batch_time * 1000:.2f} ms")
-    results_table.add_row("P50 batch time", f"{p50 * 1000:.2f} ms")
-    results_table.add_row("P95 batch time", f"{p95 * 1000:.2f} ms")
-    results_table.add_row("P99 batch time", f"{p99 * 1000:.2f} ms")
+    results_table.add_row("Avg batch wait", f"{avg_batch_wait * 1000:.2f} ms")
+    results_table.add_row("P50 batch wait", f"{p50_wait * 1000:.2f} ms")
+    results_table.add_row("P95 batch wait", f"{p95_wait * 1000:.2f} ms")
+    results_table.add_row("P99 batch wait", f"{p99_wait * 1000:.2f} ms")
     results_table.add_row("Total downloaded", f"{total_bytes / 1e9:.2f} GB")
     console.print(results_table)
 
