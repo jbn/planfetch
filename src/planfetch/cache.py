@@ -298,9 +298,11 @@ class SharedDiskCache:
         def can_delete(h: str, meta: CacheMeta) -> bool:
             if h in keep_hashes:
                 return False
-            with self._inflight_lock:
-                if h in self._inflight:
-                    return False
+            # Only check inflight if using Python backend (Rust backend manages its own inflight)
+            if not self._use_rust:
+                with self._inflight_lock:
+                    if h in self._inflight:
+                        return False
             if (now - meta.atime) < self.min_age_seconds_before_delete:
                 return False
             return True
