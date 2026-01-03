@@ -19,7 +19,8 @@ from .dataloader import (
     build_prefetching_dataloader,
 )
 from .dataset import S3PathDataset
-from .io import load_index_csv
+from .io import load_index_csv, load_index_csv_compact
+from .uri_storage import S3KeyList, S3URISequence
 from .plans import (
     PlanProvider,
     PlanView,
@@ -47,6 +48,10 @@ __all__ = [
     "StreamingStratifiedBatchPlanProvider",
     # I/O
     "load_index_csv",
+    "load_index_csv_compact",
+    # URI Storage
+    "S3KeyList",
+    "S3URISequence",
     # DataLoader
     "PlanBatchSampler",
     "PrefetchCoordinator",

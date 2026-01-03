@@ -9,6 +9,7 @@ from torch.utils.data import BatchSampler, DataLoader, Dataset
 
 from .cache import SharedDiskCache
 from .plans import PlanProvider, PlanView
+from .uri_storage import S3KeyList, S3URISequence
 
 
 class PlanBatchSampler(BatchSampler):
@@ -38,12 +39,14 @@ class PrefetchCoordinator:
 
     This is designed to keep training loops unobtrusive:
       - PrefetchingLoader calls on_batch_yielded automatically
+
+    Accepts either List[str] of full URIs or S3KeyList for memory efficiency.
     """
 
     def __init__(
         self,
         cache: SharedDiskCache,
-        s3_uris: Sequence[str],
+        s3_uris: S3URISequence,
         *,
         batches_ahead: int,
         batches_back: int,
@@ -52,7 +55,11 @@ class PrefetchCoordinator:
         prune_backend: str = "meta",
     ):
         self.cache = cache
-        self.s3_uris = list(s3_uris)
+        # Store efficiently based on input type
+        if isinstance(s3_uris, S3KeyList):
+            self._uri_storage: S3URISequence = s3_uris
+        else:
+            self._uri_storage = list(s3_uris)
         self.Ba = int(batches_ahead)
         self.Bb = int(batches_back)
         self.prune_every = int(prune_every)
@@ -61,6 +68,11 @@ class PrefetchCoordinator:
 
         self.plan: Optional[PlanView] = None
         self._step = 0
+
+    @property
+    def s3_uris(self) -> S3URISequence:
+        """URI storage (S3KeyList or List[str])."""
+        return self._uri_storage
 
     def set_plan(self, plan: PlanView) -> None:
         self.plan = plan
@@ -76,7 +88,7 @@ class PrefetchCoordinator:
         assert self.plan is not None
         lo, hi = self._window_bounds(batch_idx)
         idxs = self.plan.range_flat(lo, hi)
-        return [self.s3_uris[int(i)] for i in idxs]
+        return [self._uri_storage[int(i)] for i in idxs]
 
     def prime(self) -> None:
         if self.plan is None:
@@ -131,7 +143,7 @@ class PrefetchController:
 def build_prefetching_dataloader(
     *,
     dataset: Dataset,
-    s3_uris: Sequence[str],
+    s3_uris: S3URISequence,
     plan_provider: PlanProvider,
     cache: SharedDiskCache,
     num_workers: int,

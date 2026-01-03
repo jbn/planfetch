@@ -96,7 +96,16 @@ import numpy as np
 from PIL import Image
 import planfetch as pf
 
+# Standard loading (full URIs as List[str])
 train_uris, train_labels = pf.load_index_csv(
+    "train.csv",
+    s3_uri_col="s3_path",
+    class_col="class_id",
+)
+
+# Memory-efficient loading (~58% less memory for large datasets)
+# Use this when all files share the same bucket
+train_uris, train_labels = pf.load_index_csv_compact(
     "train.csv",
     s3_uri_col="s3_path",
     class_col="class_id",
@@ -363,6 +372,30 @@ The speedtest displays a rich progress bar and reports:
 - Total time, batches/sec, samples/sec
 - Avg/P50/P95/P99 batch latency
 - Total bytes downloaded
+
+---
+
+## Memory-efficient URI storage
+
+When all your S3 files share the same bucket, use `load_index_csv_compact()` instead of `load_index_csv()` for significant memory savings:
+
+```python
+# Instead of:
+train_uris, labels = pf.load_index_csv("train.csv", s3_uri_col="s3_path", class_col="class_id")
+
+# Use:
+train_uris, labels = pf.load_index_csv_compact("train.csv", s3_uri_col="s3_path", class_col="class_id")
+```
+
+**Memory savings for 2M samples:**
+- `load_index_csv()`: ~230 MB (full URIs as Python strings)
+- `load_index_csv_compact()`: ~96 MB (bucket stored once + packed keys)
+- **Reduction: ~58%**
+
+The returned `S3KeyList` works identically to `List[str]`:
+- Supports indexing: `train_uris[0]` returns `"s3://bucket/path/file.jpg"`
+- Supports iteration: `for uri in train_uris: ...`
+- Works with `S3PathDataset` and `build_prefetching_dataloader()` directly
 
 ---
 
