@@ -311,3 +311,152 @@ class StreamingStratifiedBatchPlanProvider(PlanProvider):
             out = out_flat.reshape(nb, self.bs)
 
         return PlanView(out)
+
+
+class BalancedSubsamplingPlanProvider(PlanProvider):
+    """
+    Balanced subsampling plan provider for imbalanced datasets.
+
+    Creates batches with exactly equal samples per class by:
+    - Undersampling majority classes (random subset each epoch)
+    - Oversampling minority classes if needed (via cyclic shuffling)
+
+    Uses _CyclicShuffler for memory-efficient streaming without pool copies.
+    """
+
+    def __init__(
+        self,
+        labels: np.ndarray,
+        samples_per_class: int,
+        *,
+        seed: int = 123,
+        epoch_samples: Optional[int] = None,
+        drop_last: bool = True,
+        shuffle_within_batch: bool = True,
+    ):
+        self.labels = np.asarray(labels, dtype=np.int64)
+        self.samples_per_class = int(samples_per_class)
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        self.shuffle_within_batch = bool(shuffle_within_batch)
+
+        if self.samples_per_class <= 0:
+            raise ValueError("samples_per_class must be positive")
+
+        # Discover classes and build pools (once)
+        classes = np.unique(self.labels)
+        self.classes = np.asarray(classes, dtype=np.int64)
+
+        self.class_to_pool: Dict[int, np.ndarray] = {}
+        for c in self.classes:
+            ci = int(c)
+            self.class_to_pool[ci] = np.where(self.labels == c)[0].astype(np.int64)
+
+        # Validate: all classes must have at least 1 sample
+        for c, pool in self.class_to_pool.items():
+            if len(pool) == 0:
+                raise ValueError(f"Class {c} has no samples")
+
+        # Compute batch_size
+        self._batch_size = self.samples_per_class * len(self.classes)
+
+        # Default epoch_samples: one pass through minority class
+        self._min_class_size = min(len(pool) for pool in self.class_to_pool.values())
+        if epoch_samples is None:
+            self.epoch_samples = self._min_class_size * len(self.classes)
+        else:
+            self.epoch_samples = int(epoch_samples)
+
+    @classmethod
+    def from_batch_size(
+        cls,
+        labels: np.ndarray,
+        batch_size: int,
+        *,
+        seed: int = 123,
+        epoch_samples: Optional[int] = None,
+        drop_last: bool = True,
+        shuffle_within_batch: bool = True,
+    ) -> "BalancedSubsamplingPlanProvider":
+        """Create from batch_size, raising if not divisible by num_classes."""
+        labels = np.asarray(labels, dtype=np.int64)
+        num_classes = len(np.unique(labels))
+        if batch_size % num_classes != 0:
+            raise ValueError(
+                f"batch_size ({batch_size}) must be divisible by num_classes ({num_classes}) "
+                f"for balanced batching. Consider samples_per_class={batch_size // num_classes} "
+                f"which gives batch_size={batch_size // num_classes * num_classes}."
+            )
+        samples_per_class = batch_size // num_classes
+        return cls(
+            labels,
+            samples_per_class,
+            seed=seed,
+            epoch_samples=epoch_samples,
+            drop_last=drop_last,
+            shuffle_within_batch=shuffle_within_batch,
+        )
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
+
+    @property
+    def num_classes(self) -> int:
+        return len(self.classes)
+
+    @property
+    def min_class_size(self) -> int:
+        return self._min_class_size
+
+    def make_epoch_plan(self, epoch: int) -> PlanView:
+        total = self.epoch_samples
+        if self.drop_last:
+            nb = total // self._batch_size
+            total2 = nb * self._batch_size
+        else:
+            nb = math.ceil(total / self._batch_size)
+            total2 = nb * self._batch_size
+
+        if nb == 0:
+            raise ValueError(
+                f"epoch_samples ({self.epoch_samples}) is less than batch_size ({self._batch_size}). "
+                f"Cannot create any batches."
+            )
+
+        rng = np.random.default_rng(self.seed + int(epoch))
+
+        # Create one CyclicShuffler per class
+        shufflers: Dict[int, _CyclicShuffler] = {}
+        for c in self.classes:
+            ci = int(c)
+            shufflers[ci] = _CyclicShuffler(
+                self.class_to_pool[ci],
+                seed=self.seed,
+                epoch=int(epoch),
+                class_id=ci,
+            )
+
+        # Allocate output
+        out = np.empty((nb, self._batch_size), dtype=np.int64)
+
+        # Fill batches
+        for b in range(nb):
+            pos = 0
+            for c in self.classes:
+                ci = int(c)
+                idxs = shufflers[ci].take(self.samples_per_class)
+                out[b, pos : pos + self.samples_per_class] = idxs
+                pos += self.samples_per_class
+
+            if self.shuffle_within_batch:
+                perm = rng.permutation(self._batch_size)
+                out[b, :] = out[b, perm]
+
+        # Handle drop_last=False padding (edge case)
+        if not self.drop_last and total2 > total:
+            out_flat = out.reshape(-1)
+            out_flat[total:] = out_flat[total:] % int(len(self.labels))
+            out = out_flat.reshape(nb, self._batch_size)
+
+        return PlanView(out)

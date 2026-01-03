@@ -22,6 +22,7 @@ from .dataset import S3PathDataset
 from .io import load_index_csv, load_index_csv_compact
 from .uri_storage import S3KeyList, S3URISequence
 from .plans import (
+    BalancedSubsamplingPlanProvider,
     PlanProvider,
     PlanView,
     SequentialPlanProvider,
@@ -41,6 +42,7 @@ __all__ = [
     "SharedDiskCache",
     "parse_s3_uri",
     # Plans
+    "BalancedSubsamplingPlanProvider",
     "PlanView",
     "PlanProvider",
     "SequentialPlanProvider",
