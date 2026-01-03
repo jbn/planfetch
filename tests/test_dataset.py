@@ -11,6 +11,16 @@ from planfetch.cache import SharedDiskCache
 from planfetch.dataset import S3PathDataset
 
 
+class FakeStreamingBody:
+    """Mock for boto3 StreamingBody."""
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def iter_chunks(self, chunk_size: int = 1024):
+        for i in range(0, len(self._data), chunk_size):
+            yield self._data[i:i + chunk_size]
+
+
 class FakeS3Client:
     """Minimal mock for boto3 S3 client."""
 
@@ -19,14 +29,13 @@ class FakeS3Client:
         self.calls = []
         self.lock = threading.Lock()
 
-    def download_file(self, bucket: str, key: str, filename: str) -> None:
+    def get_object(self, Bucket: str, Key: str) -> dict:
         with self.lock:
-            self.calls.append((bucket, key))
-        if (bucket, key) not in self.objects:
-            raise Exception(f"NoSuchKey: {bucket}/{key}")
-        data = self.objects[(bucket, key)]
-        with open(filename, "wb") as f:
-            f.write(data)
+            self.calls.append((Bucket, Key))
+        if (Bucket, Key) not in self.objects:
+            raise Exception(f"NoSuchKey: {Bucket}/{Key}")
+        data = self.objects[(Bucket, Key)]
+        return {"Body": FakeStreamingBody(data)}
 
 
 def make_cache(tmp_path, fake_s3, *, max_bytes=10_000_000, threads=4):

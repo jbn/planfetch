@@ -15,6 +15,13 @@ from botocore.config import Config as BotoConfig
 from concurrent.futures import Future, ThreadPoolExecutor
 from filelock import FileLock
 
+# Try to import Rust extension for high-performance downloads
+try:
+    from .planfetch_rs import RustS3Cache
+    HAS_RUST = True
+except ImportError:
+    HAS_RUST = False
+
 
 def _sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -63,6 +70,7 @@ class SharedDiskCache:
         min_age_seconds_before_delete: float = 2.0,
         s3_client=None,
         verbose: bool = False,
+        use_rust: bool = True,
     ):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -73,14 +81,20 @@ class SharedDiskCache:
         self.min_age_seconds_before_delete = float(min_age_seconds_before_delete)
         self.verbose = bool(verbose)
 
-        if s3_client is None:
-            cfg = BotoConfig(max_pool_connections=int(s3_max_pool_connections))
-            s3_client = boto3.client("s3", config=cfg)
-        self.s3 = s3_client
+        # Use Rust backend if available and requested, but not if a custom s3_client is provided
+        # (Rust uses its own AWS SDK client)
+        self._use_rust = use_rust and HAS_RUST and s3_client is None
+        if self._use_rust:
+            self._rust_cache = RustS3Cache(str(cache_dir), download_threads)
+        else:
+            if s3_client is None:
+                cfg = BotoConfig(max_pool_connections=int(s3_max_pool_connections))
+                s3_client = boto3.client("s3", config=cfg)
+            self.s3 = s3_client
 
-        self._pool = ThreadPoolExecutor(max_workers=int(download_threads))
-        self._inflight: Dict[str, Future] = {}
-        self._inflight_lock = threading.Lock()
+            self._pool = ThreadPoolExecutor(max_workers=int(download_threads))
+            self._inflight: Dict[str, Future] = {}
+            self._inflight_lock = threading.Lock()
 
         self._meta: Dict[str, CacheMeta] = {}
         self._meta_lock = threading.Lock()
@@ -131,6 +145,11 @@ class SharedDiskCache:
         Return a local on-disk path for the given S3 URI, downloading if necessary.
         Blocks until the file is present.
         """
+        if self._use_rust:
+            path = self._rust_cache.ensure_local(s3_uri)
+            self._touch(s3_uri, Path(path))
+            return path
+
         dst = self._path_for(s3_uri)
         if dst.exists():
             self._touch(s3_uri, dst)
@@ -156,6 +175,10 @@ class SharedDiskCache:
         """
         Schedule downloads for a list of S3 URIs. Does not block.
         """
+        if self._use_rust:
+            self._rust_cache.prime_prefetch(list(s3_uris))
+            return
+
         for uri in s3_uris:
             if self._path_for(uri).exists():
                 continue
@@ -173,6 +196,10 @@ class SharedDiskCache:
 
         If raise_errors=True, re-raise the first download exception encountered.
         """
+        if self._use_rust:
+            self._rust_cache.wait_for_inflight()
+            return
+
         while True:
             with self._inflight_lock:
                 futs = list(self._inflight.values())

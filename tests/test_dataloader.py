@@ -11,6 +11,16 @@ from planfetch.dataloader import PrefetchCoordinator
 from planfetch.plans import SequentialPlanProvider
 
 
+class FakeStreamingBody:
+    """Mock for boto3 StreamingBody."""
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def iter_chunks(self, chunk_size: int = 1024):
+        for i in range(0, len(self._data), chunk_size):
+            yield self._data[i:i + chunk_size]
+
+
 class FakeS3Client:
     """
     Minimal mock for boto3 S3 client. Stores objects in-memory as bytes.
@@ -20,12 +30,11 @@ class FakeS3Client:
         self.calls = []
         self.lock = threading.Lock()
 
-    def download_file(self, bucket: str, key: str, filename: str) -> None:
+    def get_object(self, Bucket: str, Key: str) -> dict:
         with self.lock:
-            self.calls.append((bucket, key))
-        data = self.objects[(bucket, key)]
-        with open(filename, "wb") as f:
-            f.write(data)
+            self.calls.append((Bucket, Key))
+        data = self.objects[(Bucket, Key)]
+        return {"Body": FakeStreamingBody(data)}
 
 
 def make_cache(tmp_path, fake_s3, *, max_bytes=10_000_000, min_age=0.0, threads=4):
