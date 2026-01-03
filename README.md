@@ -313,6 +313,59 @@ Good starting knobs:
 
 ---
 
+## CLI: Speedtest
+
+planfetch includes a CLI for benchmarking S3 prefetching performance. Use it to find optimal configuration before training on GPUs.
+
+```bash
+planfetch speedtest <csv_path> [OPTIONS]
+```
+
+### Quick examples
+
+```bash
+# Quick test with 1000 samples
+planfetch speedtest data.csv --limit 1000 --batch-size 32
+
+# Tune prefetch settings
+planfetch speedtest data.csv \
+  --batch-size 64 \
+  --download-threads 128 \
+  --batches-ahead 300 \
+  --cache-dir /mnt/nvme/cache
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-n, --limit` | all | Process only first N rows |
+| `--offset` | 0 | Skip first N rows |
+| `--sample-frac` | - | Random sample fraction (0.0-1.0) |
+| `--s3-uri-col` | `s3_uri` | Column name for S3 URIs |
+| `--class-col` | `label` | Column name for class labels |
+| `--batch-size` | 64 | Batch size |
+| `--cache-dir` | temp | Local cache directory |
+| `--max-bytes` | 10GB | Maximum cache size |
+| `--download-threads` | 64 | Number of download threads |
+| `--s3-pool-connections` | 256 | Boto3 connection pool size |
+| `--batches-ahead` | 200 | Batches to prefetch ahead |
+| `--batches-back` | 4 | Batches to keep behind |
+| `--prune-every` | 5 | Prune frequency (every N batches) |
+| `--prune-mode` | window | `window` or `pressure` |
+| `--prune-backend` | meta | `meta` or `scan` |
+| `--strategy` | shuffle | `shuffle`, `sequential`, or `stratified` |
+| `-v, --verbose` | - | Verbose output |
+
+### Output
+
+The speedtest displays a rich progress bar and reports:
+- Total time, batches/sec, samples/sec
+- Avg/P50/P95/P99 batch latency
+- Total bytes downloaded
+
+---
+
 ## Notes on future DDP
 
 When you move to DDP later:

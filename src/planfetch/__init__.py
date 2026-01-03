@@ -61,4 +61,6 @@ __all__ = [
 
 
 def main() -> None:
-    print("Hello from planfetch!")
+    from .cli import cli
+
+    cli()
