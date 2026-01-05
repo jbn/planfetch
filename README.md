@@ -542,6 +542,97 @@ Requirements: Rust toolchain, maturin
 
 ---
 
+## S3 Prefix Performance & Cost Expectations
+
+Understanding S3 prefix partitioning is essential for achieving high throughput with planfetch.
+
+### Request Rate Limits per Prefix
+
+Per [AWS official documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html):
+
+> Your application can achieve at least **3,500 PUT/COPY/POST/DELETE** or **5,500 GET/HEAD requests per second per partitioned Amazon S3 prefix**.
+
+There is **no limit** to the number of prefixes in a bucket, and performance scales linearly:
+- 10 prefixes × 5,500 GET/sec = **55,000 GET requests/sec**
+- 100 prefixes × 5,500 GET/sec = **550,000 GET requests/sec**
+
+### What is a Prefix?
+
+A prefix is any leading portion of an object key. S3 partitions data based on the **full key name**, treating `/` as just another character (not a directory delimiter).
+
+```
+s3://my-bucket/images/train/class_001/img_0001.jpg
+              └─────────────────────────────────────┘
+              ↑ Everything after the bucket is the key
+
+Possible prefixes for this key:
+  - "images/"
+  - "images/train/"
+  - "images/train/class_001/"
+  - "images/train/class_001/img_"
+```
+
+### How S3 Partitions Internally
+
+S3 does not document its internal partitioning algorithm. What's known:
+
+- Partitioning is **automatic and opaque**—S3 monitors request patterns and repartitions behind the scenes
+- S3 can split at **any point in the key**, not just at `/` boundaries
+- Auto-partitioning takes **30–60 minutes** to adjust to new load
+- You can request **pre-partitioning** via AWS support for anticipated high-traffic prefixes
+
+Your job isn't to control partitioning directly—it's to structure keys so high-traffic objects have **diverse leading characters**, giving S3 good options for splitting.
+
+### Deriving Effective Prefixes for High Throughput
+
+**Good: Hash/UUID prefixes distribute load across partitions**
+```
+s3://bucket/a1b2c3d4/train/image_001.jpg
+s3://bucket/e5f6g7h8/train/image_002.jpg
+s3://bucket/i9j0k1l2/train/image_003.jpg
+```
+
+**Good: Class-based prefixes (natural distribution)**
+```
+s3://bucket/train/class_000/img_001.jpg   # prefix: train/class_000/
+s3://bucket/train/class_001/img_001.jpg   # prefix: train/class_001/
+s3://bucket/train/class_999/img_001.jpg   # prefix: train/class_999/
+# 1000 classes = 1000 prefixes = 5.5M GET/sec theoretical max
+```
+
+**Bad: Timestamp prefixes create moving hotspots**
+```
+s3://bucket/2024-01-01/image_001.jpg  # All today's writes hit one partition
+s3://bucket/2024-01-01/image_002.jpg  # Tomorrow shifts to a new hotspot
+```
+
+### Automatic Scaling Behavior
+
+S3 automatically repartitions as load increases, but this takes time:
+
+> While Amazon S3 is scaling to your new higher request rate, you may see some 503 (Slow Down) errors. These errors will dissipate when the scaling is complete.
+
+For sustained high-throughput workloads, AWS recommends:
+1. Ramp up request rate gradually (not a sudden spike)
+2. Use exponential backoff on 503 errors (boto3/AWS SDKs do this automatically)
+3. Distribute requests across multiple prefixes from the start
+
+### Cost Expectations
+
+S3 Standard GET request pricing: **$0.0004 per 1,000 requests** (US East, as of 2024).
+
+**Example: 1,000,000 files × 500 KB each (same-region EC2)**
+
+```
+GET requests per epoch = 1,000,000 ÷ 1,000 × $0.0004 = $0.40/epoch
+
+10 epochs = $4.00 total
+```
+
+> **Note:** Data transfer between S3 and EC2 in the same region is free. Storage and other costs not included above.
+
+---
+
 ## Notes on future DDP
 
 When you move to DDP later:
