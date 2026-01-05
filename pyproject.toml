@@ -39,4 +39,5 @@ dev = [
     "pandas>=2.0",
     "pytest>=9.0.2",
     "pytorch-lightning>=2.6.0",
+    "ty>=0.0.9",
 ]
