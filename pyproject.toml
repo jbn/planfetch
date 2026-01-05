@@ -36,6 +36,7 @@ manifest-path = "rust/Cargo.toml"
 
 [dependency-groups]
 dev = [
+    "pandas>=2.0",
     "pytest>=9.0.2",
     "pytorch-lightning>=2.6.0",
 ]

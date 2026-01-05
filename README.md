@@ -105,11 +105,37 @@ train_uris, train_labels = pf.load_index_csv(
 )
 
 # Memory-efficient loading (~58% less memory for large datasets)
-# Use this when all files share the same bucket
-train_uris, train_labels = pf.load_index_csv_compact(
+# pack_uris=True returns S3KeyList instead of List[str]
+train_uris, train_labels = pf.load_index_csv(
     "train.csv",
     s3_uri_col="s3_path",
     class_col="class_id",
+    pack_uris=True,  # infers prefix from first URI
+)
+
+# With explicit prefix (validates all URIs match)
+train_uris, train_labels = pf.load_index_csv(
+    "train.csv",
+    s3_uri_col="s3_path",
+    class_col="class_id",
+    pack_uris=True,
+    compact_prefix="s3://my-bucket",  # or "s3://my-bucket/data/train"
+)
+
+# From pandas DataFrame
+train_uris, train_labels = pf.load_index_dataframe(
+    df,
+    s3_uri_col="s3_path",
+    class_col="class_id",
+)
+
+# Memory-efficient from DataFrame
+train_uris, train_labels = pf.load_index_dataframe(
+    df,
+    s3_uri_col="s3_path",
+    class_col="class_id",
+    pack_uris=True,
+    compact_prefix="s3://my-bucket",
 )
 ```
 
@@ -402,25 +428,43 @@ The speedtest displays a rich progress bar and reports:
 
 ## Memory-efficient URI storage
 
-When all your S3 files share the same bucket, use `load_index_csv_compact()` instead of `load_index_csv()` for significant memory savings:
+When all your S3 files share a common bucket, use `pack_uris=True` for significant memory savings:
 
 ```python
-# Instead of:
+# Standard loading (full URIs as Python strings)
 train_uris, labels = pf.load_index_csv("train.csv", s3_uri_col="s3_path", class_col="class_id")
 
-# Use:
-train_uris, labels = pf.load_index_csv_compact("train.csv", s3_uri_col="s3_path", class_col="class_id")
+# Memory-efficient loading (prefix stored once + packed suffixes)
+train_uris, labels = pf.load_index_csv(
+    "train.csv",
+    s3_uri_col="s3_path",
+    class_col="class_id",
+    pack_uris=True,  # infers prefix from first URI, validates all share same bucket
+)
+
+# With explicit prefix (for additional validation or partial path prefixes)
+train_uris, labels = pf.load_index_csv(
+    "train.csv",
+    s3_uri_col="s3_path",
+    class_col="class_id",
+    pack_uris=True,
+    compact_prefix="s3://my-bucket/data/train",  # all URIs must match this prefix
+)
 ```
 
 **Memory savings for 2M samples:**
-- `load_index_csv()`: ~230 MB (full URIs as Python strings)
-- `load_index_csv_compact()`: ~96 MB (bucket stored once + packed keys)
+- Without `pack_uris`: ~230 MB (full URIs as Python strings)
+- With `pack_uris=True`: ~96 MB (prefix stored once + packed suffixes)
 - **Reduction: ~58%**
 
 The returned `S3KeyList` works identically to `List[str]`:
 - Supports indexing: `train_uris[0]` returns `"s3://bucket/path/file.jpg"`
 - Supports iteration: `for uri in train_uris: ...`
 - Works with `S3PathDataset` and `build_prefetching_dataloader()` directly
+
+**Note:** When using `pack_uris=True`:
+- Without `compact_prefix`: Prefix is inferred from first URI; all URIs must share the same bucket
+- With `compact_prefix`: All URIs must start with the specified prefix; a `ValueError` is raised with the index of any mismatched URI
 
 ---
 

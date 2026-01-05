@@ -64,6 +64,17 @@ class TestS3KeyList:
         assert keys.get_key(0) == "path/to/file.jpg"
         assert keys.get_key(1) == "other.png"
 
+    def test_get_suffix(self):
+        """Test get_suffix returns the suffix."""
+        uris = [
+            "s3://mybucket/path/to/file.jpg",
+            "s3://mybucket/other.png",
+        ]
+        keys = S3KeyList.from_uris(uris)
+
+        assert keys.get_suffix(0) == "path/to/file.jpg"
+        assert keys.get_suffix(1) == "other.png"
+
     def test_get_bucket_and_key(self):
         """Test get_bucket_and_key returns tuple."""
         uris = ["s3://mybucket/path/file.jpg"]
@@ -188,7 +199,7 @@ class TestS3KeyList:
         keys = S3KeyList.from_uris(uris)
 
         r = repr(keys)
-        assert "mybucket" in r
+        assert "s3://mybucket/" in r
         assert "n=2" in r
 
     def test_packed_storage_structure(self):
@@ -213,17 +224,128 @@ class TestS3KeyList:
     def test_slotted_class(self):
         """Test that S3KeyList uses __slots__ for memory efficiency."""
         assert hasattr(S3KeyList, "__slots__")
-        assert "bucket" in S3KeyList.__slots__
+        assert "prefix" in S3KeyList.__slots__
         assert "_data" in S3KeyList.__slots__
         assert "_offsets" in S3KeyList.__slots__
+
+    def test_bucket_property(self):
+        """Test that bucket property extracts bucket from prefix."""
+        uris = ["s3://mybucket/path/file.jpg"]
+        keys = S3KeyList.from_uris(uris)
+
+        assert keys.bucket == "mybucket"
+        assert keys.prefix == "s3://mybucket/"
+
+    def test_prefix_attribute(self):
+        """Test prefix attribute stores full prefix."""
+        uris = ["s3://mybucket/path/file.jpg", "s3://mybucket/other/file.jpg"]
+        keys = S3KeyList.from_uris(uris)
+
+        assert keys.prefix == "s3://mybucket/"
+
+
+class TestS3KeyListFromPrefixIterable:
+    """Test suite for S3KeyList.from_prefix_iterable method."""
+
+    def test_basic(self):
+        """Test basic from_prefix_iterable usage."""
+        uris = [
+            "s3://bucket/key1.jpg",
+            "s3://bucket/key2.jpg",
+            "s3://bucket/key3.jpg",
+        ]
+        keys = S3KeyList.from_prefix_iterable("s3://bucket", uris)
+
+        assert len(keys) == 3
+        assert keys[0] == "s3://bucket/key1.jpg"
+        assert keys[1] == "s3://bucket/key2.jpg"
+        assert keys[2] == "s3://bucket/key3.jpg"
+
+    def test_prefix_with_trailing_slash(self):
+        """Test prefix with trailing slash."""
+        uris = ["s3://bucket/key.jpg"]
+        keys = S3KeyList.from_prefix_iterable("s3://bucket/", uris)
+
+        assert keys[0] == "s3://bucket/key.jpg"
+        assert keys.prefix == "s3://bucket/"
+
+    def test_prefix_without_trailing_slash(self):
+        """Test prefix without trailing slash gets normalized."""
+        uris = ["s3://bucket/key.jpg"]
+        keys = S3KeyList.from_prefix_iterable("s3://bucket", uris)
+
+        assert keys[0] == "s3://bucket/key.jpg"
+        assert keys.prefix == "s3://bucket/"
+
+    def test_partial_path_prefix(self):
+        """Test with partial path prefix."""
+        uris = [
+            "s3://bucket/data/train/img1.jpg",
+            "s3://bucket/data/train/img2.jpg",
+        ]
+        keys = S3KeyList.from_prefix_iterable("s3://bucket/data/train", uris)
+
+        assert keys[0] == "s3://bucket/data/train/img1.jpg"
+        assert keys[1] == "s3://bucket/data/train/img2.jpg"
+        assert keys.prefix == "s3://bucket/data/train/"
+
+    def test_bucket_property_with_partial_prefix(self):
+        """Test bucket property extracts bucket from partial path prefix."""
+        uris = ["s3://mybucket/data/train/img.jpg"]
+        keys = S3KeyList.from_prefix_iterable("s3://mybucket/data/train", uris)
+
+        assert keys.bucket == "mybucket"
+        assert keys.prefix == "s3://mybucket/data/train/"
+
+    def test_prefix_mismatch_raises(self):
+        """Test that prefix mismatch raises with index."""
+        uris = [
+            "s3://bucket/key1.jpg",
+            "s3://other-bucket/key2.jpg",
+        ]
+        with pytest.raises(ValueError, match="index 1"):
+            S3KeyList.from_prefix_iterable("s3://bucket", uris)
+
+    def test_empty_iterable_raises(self):
+        """Test that empty iterable raises ValueError."""
+        with pytest.raises(ValueError, match="empty"):
+            S3KeyList.from_prefix_iterable("s3://bucket", [])
+
+    def test_iteration_works(self):
+        """Test that resulting S3KeyList supports iteration."""
+        uris = ["s3://bucket/a.jpg", "s3://bucket/b.jpg"]
+        keys = S3KeyList.from_prefix_iterable("s3://bucket", uris)
+
+        result = list(keys)
+        assert result == uris
+
+    def test_generator_input(self):
+        """Test that from_prefix_iterable works with generators."""
+
+        def uri_gen():
+            for i in range(3):
+                yield f"s3://bucket/file{i}.jpg"
+
+        keys = S3KeyList.from_prefix_iterable("s3://bucket", uri_gen())
+
+        assert len(keys) == 3
+        assert keys[0] == "s3://bucket/file0.jpg"
+        assert keys[2] == "s3://bucket/file2.jpg"
+
+    def test_get_suffix(self):
+        """Test get_suffix returns the part after prefix."""
+        uris = ["s3://bucket/data/train/img.jpg"]
+        keys = S3KeyList.from_prefix_iterable("s3://bucket/data/train", uris)
+
+        assert keys.get_suffix(0) == "img.jpg"
 
 
 class TestS3KeyListWithIO:
     """Integration tests with io module."""
 
-    def test_load_index_csv_compact(self, tmp_path):
-        """Test load_index_csv_compact returns S3KeyList."""
-        from planfetch.io import load_index_csv_compact
+    def test_load_index_csv_with_pack_uris(self, tmp_path):
+        """Test load_index_csv with pack_uris=True returns S3KeyList."""
+        from planfetch.io import load_index_csv
 
         csv_path = tmp_path / "test.csv"
         csv_path.write_text(
@@ -233,8 +355,11 @@ class TestS3KeyListWithIO:
             "s3://bucket/c.jpg,2\n"
         )
 
-        keys, labels = load_index_csv_compact(
-            csv_path, s3_uri_col="s3_path", class_col="class_id"
+        keys, labels = load_index_csv(
+            csv_path,
+            s3_uri_col="s3_path",
+            class_col="class_id",
+            pack_uris=True,
         )
 
         assert isinstance(keys, S3KeyList)
@@ -243,9 +368,35 @@ class TestS3KeyListWithIO:
         assert keys[0] == "s3://bucket/a.jpg"
         np.testing.assert_array_equal(labels, [0, 1, 2])
 
-    def test_load_index_csv_compact_mixed_buckets_raises(self, tmp_path):
-        """Test load_index_csv_compact raises for mixed buckets."""
-        from planfetch.io import load_index_csv_compact
+    def test_load_index_csv_with_pack_uris_and_compact_prefix(self, tmp_path):
+        """Test load_index_csv with pack_uris=True and compact_prefix."""
+        from planfetch.io import load_index_csv
+
+        csv_path = tmp_path / "test.csv"
+        csv_path.write_text(
+            "s3_path,class_id\n"
+            "s3://bucket/a.jpg,0\n"
+            "s3://bucket/b.jpg,1\n"
+            "s3://bucket/c.jpg,2\n"
+        )
+
+        keys, labels = load_index_csv(
+            csv_path,
+            s3_uri_col="s3_path",
+            class_col="class_id",
+            pack_uris=True,
+            compact_prefix="s3://bucket",
+        )
+
+        assert isinstance(keys, S3KeyList)
+        assert len(keys) == 3
+        assert keys.bucket == "bucket"
+        assert keys[0] == "s3://bucket/a.jpg"
+        np.testing.assert_array_equal(labels, [0, 1, 2])
+
+    def test_load_index_csv_compact_prefix_mismatch_raises(self, tmp_path):
+        """Test load_index_csv raises for prefix mismatch."""
+        from planfetch.io import load_index_csv
 
         csv_path = tmp_path / "test.csv"
         csv_path.write_text(
@@ -254,5 +405,58 @@ class TestS3KeyListWithIO:
             "s3://bucket2/b.jpg,1\n"
         )
 
-        with pytest.raises(ValueError, match="Mixed buckets"):
-            load_index_csv_compact(csv_path, s3_uri_col="s3_path", class_col="class_id")
+        with pytest.raises(ValueError, match="index 1"):
+            load_index_csv(
+                csv_path,
+                s3_uri_col="s3_path",
+                class_col="class_id",
+                pack_uris=True,
+                compact_prefix="s3://bucket1",
+            )
+
+    def test_load_index_dataframe_with_pack_uris(self):
+        """Test load_index_dataframe with pack_uris=True returns S3KeyList."""
+        import pandas as pd
+
+        from planfetch.io import load_index_dataframe
+
+        df = pd.DataFrame({
+            "s3_path": ["s3://bucket/a.jpg", "s3://bucket/b.jpg"],
+            "class_id": [0, 1],
+        })
+
+        keys, labels = load_index_dataframe(
+            df,
+            s3_uri_col="s3_path",
+            class_col="class_id",
+            pack_uris=True,
+        )
+
+        assert isinstance(keys, S3KeyList)
+        assert len(keys) == 2
+        assert keys.bucket == "bucket"
+        np.testing.assert_array_equal(labels, [0, 1])
+
+    def test_load_index_dataframe_with_pack_uris_and_compact_prefix(self):
+        """Test load_index_dataframe with pack_uris=True and compact_prefix."""
+        import pandas as pd
+
+        from planfetch.io import load_index_dataframe
+
+        df = pd.DataFrame({
+            "s3_path": ["s3://bucket/a.jpg", "s3://bucket/b.jpg"],
+            "class_id": [0, 1],
+        })
+
+        keys, labels = load_index_dataframe(
+            df,
+            s3_uri_col="s3_path",
+            class_col="class_id",
+            pack_uris=True,
+            compact_prefix="s3://bucket",
+        )
+
+        assert isinstance(keys, S3KeyList)
+        assert len(keys) == 2
+        assert keys.bucket == "bucket"
+        np.testing.assert_array_equal(labels, [0, 1])
