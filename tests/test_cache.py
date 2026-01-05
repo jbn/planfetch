@@ -5,7 +5,24 @@ from typing import Dict, Tuple
 
 import pytest
 
-from planfetch.cache import SharedDiskCache
+from planfetch.cache import SharedDiskCache, has_rust_backend, assert_rust_backend
+
+
+def test_has_rust_backend_returns_bool():
+    """has_rust_backend() should return a boolean."""
+    result = has_rust_backend()
+    assert isinstance(result, bool)
+
+
+def test_assert_rust_backend_when_available():
+    """assert_rust_backend() should not raise if Rust is available."""
+    if has_rust_backend():
+        # Should not raise
+        assert_rust_backend()
+    else:
+        # Should raise RuntimeError
+        with pytest.raises(RuntimeError, match="planfetch_rs"):
+            assert_rust_backend()
 
 
 class FakeStreamingBody:

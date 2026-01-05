@@ -10,7 +10,13 @@ This package provides:
 - S3PrefetchLightningCallback: Optional PyTorch Lightning integration
 """
 
-from .cache import CacheMeta, SharedDiskCache, parse_s3_uri
+from .cache import (
+    CacheMeta,
+    SharedDiskCache,
+    assert_rust_backend,
+    has_rust_backend,
+    parse_s3_uri,
+)
 from .dataloader import (
     PlanBatchSampler,
     PrefetchController,
@@ -40,6 +46,8 @@ __all__ = [
     # Cache
     "CacheMeta",
     "SharedDiskCache",
+    "assert_rust_backend",
+    "has_rust_backend",
     "parse_s3_uri",
     # Plans
     "BalancedSubsamplingPlanProvider",

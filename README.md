@@ -468,6 +468,80 @@ The returned `S3KeyList` works identically to `List[str]`:
 
 ---
 
+## Rust S3 downloader (optional, high-performance)
+
+planfetch includes an optional Rust extension (`planfetch_rs`) that provides significantly faster S3 downloads via async I/O.
+
+### Why Rust?
+
+The Python backend uses `boto3` with a `ThreadPoolExecutor`. The Rust backend uses:
+- **tokio**: Async runtime with true concurrent I/O (not thread-per-download)
+- **aws-sdk-s3**: Native AWS SDK with connection pooling
+- **DashMap**: Lock-free concurrent set for inflight deduplication
+
+This can improve download throughput, especially with high `download_threads` settings.
+
+### Usage
+
+The Rust backend is **enabled by default** when:
+1. The extension is compiled and available (`planfetch_rs.so`)
+2. No custom `s3_client` is passed to `SharedDiskCache`
+
+```python
+# Rust backend enabled automatically
+cache = pf.SharedDiskCache("/mnt/nvme/cache", download_threads=128)
+
+# Explicitly disable Rust backend
+cache = pf.SharedDiskCache("/mnt/nvme/cache", use_rust=False)
+
+# Custom s3_client forces Python backend
+cache = pf.SharedDiskCache("/mnt/nvme/cache", s3_client=my_boto_client)
+```
+
+### Requiring the Rust backend
+
+For production workloads where Python thread contention is too slow, use `assert_rust_backend()` to fail fast at startup:
+
+```python
+import planfetch as pf
+
+# Fail immediately if Rust backend is not available
+pf.assert_rust_backend()
+
+# Now safe to proceed - Rust will be used
+cache = pf.SharedDiskCache("/mnt/nvme/cache", download_threads=128)
+```
+
+You can also check availability without raising:
+
+```python
+if pf.has_rust_backend():
+    print("Using high-performance Rust backend")
+else:
+    print("Falling back to Python backend")
+```
+
+### Features
+
+- **Async downloads**: Uses tokio multi-threaded runtime
+- **Semaphore-limited concurrency**: Configurable via `download_threads`
+- **Inflight deduplication**: Won't re-download the same file if already in progress
+- **Atomic writes**: Downloads to temp file, then renames
+- **Exponential backoff retries**: Up to 6 attempts per file
+
+### Building from source
+
+The Rust extension is built automatically with `uv build` (via maturin). To build manually:
+
+```bash
+cd rust
+cargo build --release
+```
+
+Requirements: Rust toolchain, maturin
+
+---
+
 ## Notes on future DDP
 
 When you move to DDP later:

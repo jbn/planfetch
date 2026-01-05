@@ -23,6 +23,32 @@ except ImportError:
     HAS_RUST = False
 
 
+def has_rust_backend() -> bool:
+    """Check if the Rust S3 backend is available."""
+    return HAS_RUST
+
+
+def assert_rust_backend() -> None:
+    """
+    Assert that the Rust S3 backend is available.
+
+    Raises RuntimeError if the Rust extension is not compiled/installed.
+    Use this at startup to fail fast if you require the high-performance
+    Rust backend and don't want to fall back to the slower Python implementation.
+
+    Example:
+        import planfetch as pf
+        pf.assert_rust_backend()  # Fail early if Rust not available
+    """
+    if not HAS_RUST:
+        raise RuntimeError(
+            "Rust S3 backend (planfetch_rs) is not available. "
+            "The Python backend uses ThreadPoolExecutor which may be too slow "
+            "for production workloads. Build with `uv build` or install a wheel "
+            "with the Rust extension included."
+        )
+
+
 def _sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
