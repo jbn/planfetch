@@ -1,4 +1,5 @@
 """Tests for planfetch.plans module."""
+
 import numpy as np
 import pytest
 
@@ -24,7 +25,9 @@ def test_planview_range_flat():
 def test_streaming_stratified_counts_and_determinism():
     # Two balanced classes, batch_size divisible by num_classes -> exact per-batch stratification.
     labels = np.array([0] * 50 + [1] * 50, dtype=np.int64)
-    prov = StreamingStratifiedBatchPlanProvider(labels, batch_size=10, epoch_samples=100, seed=123)
+    prov = StreamingStratifiedBatchPlanProvider(
+        labels, batch_size=10, epoch_samples=100, seed=123
+    )
 
     plan0_a = prov.make_epoch_plan(0)
     plan0_b = prov.make_epoch_plan(0)
@@ -77,14 +80,14 @@ def test_balanced_subsampling_imbalanced():
     """Test that majority classes are undersampled."""
     # Class 0: 1000 samples (majority)
     # Class 1: 100 samples (minority)
-    labels = np.concatenate([
-        np.zeros(1000, dtype=np.int64),
-        np.ones(100, dtype=np.int64),
-    ])
-
-    prov = BalancedSubsamplingPlanProvider(
-        labels, samples_per_class=10, seed=42
+    labels = np.concatenate(
+        [
+            np.zeros(1000, dtype=np.int64),
+            np.ones(100, dtype=np.int64),
+        ]
     )
+
+    prov = BalancedSubsamplingPlanProvider(labels, samples_per_class=10, seed=42)
 
     assert prov.batch_size == 20
     assert prov.min_class_size == 100
@@ -106,10 +109,12 @@ def test_balanced_subsampling_oversampling():
     """Test that minority classes are oversampled when needed."""
     # Class 0: 50 samples (minority)
     # Class 1: 500 samples (majority)
-    labels = np.concatenate([
-        np.zeros(50, dtype=np.int64),
-        np.ones(500, dtype=np.int64),
-    ])
+    labels = np.concatenate(
+        [
+            np.zeros(50, dtype=np.int64),
+            np.ones(500, dtype=np.int64),
+        ]
+    )
 
     # Request more samples than minority class has
     prov = BalancedSubsamplingPlanProvider(
@@ -162,14 +167,14 @@ def test_balanced_subsampling_determinism():
 def test_balanced_subsampling_different_subsets_per_epoch():
     """Test that majority classes get different random subsets each epoch."""
     # Large majority class
-    labels = np.concatenate([
-        np.zeros(10000, dtype=np.int64),  # majority
-        np.ones(100, dtype=np.int64),      # minority
-    ])
-
-    prov = BalancedSubsamplingPlanProvider(
-        labels, samples_per_class=10, seed=42
+    labels = np.concatenate(
+        [
+            np.zeros(10000, dtype=np.int64),  # majority
+            np.ones(100, dtype=np.int64),  # minority
+        ]
     )
+
+    prov = BalancedSubsamplingPlanProvider(labels, samples_per_class=10, seed=42)
 
     plan0 = prov.make_epoch_plan(0)
     plan1 = prov.make_epoch_plan(1)
@@ -202,9 +207,7 @@ def test_balanced_subsampling_from_batch_size():
 
     # Invalid: 30 not divisible by 4
     with pytest.raises(ValueError, match="divisible"):
-        BalancedSubsamplingPlanProvider.from_batch_size(
-            labels, batch_size=30, seed=42
-        )
+        BalancedSubsamplingPlanProvider.from_batch_size(labels, batch_size=30, seed=42)
 
 
 def test_balanced_subsampling_single_sample_minority():
@@ -229,14 +232,11 @@ def test_balanced_subsampling_many_classes():
     """Test with many classes (e.g., 100-way classification)."""
     num_classes = 100
     samples_per_class_data = 50
-    labels = np.concatenate([
-        np.full(samples_per_class_data, i, dtype=np.int64)
-        for i in range(num_classes)
-    ])
-
-    prov = BalancedSubsamplingPlanProvider(
-        labels, samples_per_class=2, seed=42
+    labels = np.concatenate(
+        [np.full(samples_per_class_data, i, dtype=np.int64) for i in range(num_classes)]
     )
+
+    prov = BalancedSubsamplingPlanProvider(labels, samples_per_class=2, seed=42)
 
     assert prov.batch_size == 200  # 2 * 100
     assert prov.num_classes == 100

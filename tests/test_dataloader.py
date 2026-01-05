@@ -1,4 +1,5 @@
 """Tests for planfetch.dataloader module (integration tests)."""
+
 import threading
 from pathlib import Path
 from typing import Dict, Tuple
@@ -13,18 +14,20 @@ from planfetch.plans import SequentialPlanProvider
 
 class FakeStreamingBody:
     """Mock for boto3 StreamingBody."""
+
     def __init__(self, data: bytes):
         self._data = data
 
     def iter_chunks(self, chunk_size: int = 1024):
         for i in range(0, len(self._data), chunk_size):
-            yield self._data[i:i + chunk_size]
+            yield self._data[i : i + chunk_size]
 
 
 class FakeS3Client:
     """
     Minimal mock for boto3 S3 client. Stores objects in-memory as bytes.
     """
+
     def __init__(self, objects: Dict[Tuple[str, str], bytes]):
         self.objects = dict(objects)
         self.calls = []
@@ -55,13 +58,15 @@ def test_prefetch_window_prunes_previous_batches(tmp_path):
 
     s3_uris = [f"s3://b/k{i}" for i in range(6)]
 
-    plan_provider = SequentialPlanProvider(n=6, batch_size=2, epoch_samples=6, drop_last=True)
+    plan_provider = SequentialPlanProvider(
+        n=6, batch_size=2, epoch_samples=6, drop_last=True
+    )
     plan = plan_provider.make_epoch_plan(0)
 
     prefetch = PrefetchCoordinator(
         cache=cache,
         s3_uris=s3_uris,
-        batches_ahead=2,   # keep current + next
+        batches_ahead=2,  # keep current + next
         batches_back=0,
         prune_every=1,
         prune_mode="window",

@@ -19,9 +19,12 @@ class PlanView:
     - ~16MB for 2M indices (instead of hundreds of MB as Python ints).
     - Fast iteration, fast window queries for prefetching.
     """
+
     def __init__(self, batches: np.ndarray):
         if batches.ndim != 2 or batches.dtype != np.int64:
-            raise ValueError("PlanView expects a 2D np.int64 array [num_batches, batch_size].")
+            raise ValueError(
+                "PlanView expects a 2D np.int64 array [num_batches, batch_size]."
+            )
         self._batches = batches
 
     def __len__(self) -> int:
@@ -52,6 +55,7 @@ class SequentialPlanProvider(PlanProvider):
     """
     Deterministic sequential plan, useful for val/test.
     """
+
     def __init__(
         self,
         n: int,
@@ -87,6 +91,7 @@ class ShuffleOncePerEpochPlanProvider(PlanProvider):
     For large datasets, it avoids permuting the full [0..n) by using
     choice-without-replacement for epoch_samples.
     """
+
     def __init__(
         self,
         n: int,
@@ -119,7 +124,9 @@ class ShuffleOncePerEpochPlanProvider(PlanProvider):
             perm = rng.permutation(self.n).astype(np.int64, copy=False)
             seq = perm[:total2]
         else:
-            seq = rng.choice(self.n, size=total2, replace=False).astype(np.int64, copy=False)
+            seq = rng.choice(self.n, size=total2, replace=False).astype(
+                np.int64, copy=False
+            )
 
         if not self.drop_last and total2 > total:
             seq[total:] = seq[total:] % total
@@ -181,7 +188,7 @@ class _CyclicShuffler:
 
             positions = self.pos + np.arange(take_now, dtype=np.int64)
             idxs = (self.start + (self.step * positions)) % self.n
-            out[written:written + take_now] = self.pool[idxs]
+            out[written : written + take_now] = self.pool[idxs]
 
             self.pos += take_now
             written += take_now
@@ -290,7 +297,9 @@ class StreamingStratifiedBatchPlanProvider(PlanProvider):
 
         shufflers: Dict[int, _CyclicShuffler] = {}
         for c, _k in active:
-            shufflers[c] = _CyclicShuffler(self.class_to_pool[c], seed=self.seed, epoch=int(epoch), class_id=int(c))
+            shufflers[c] = _CyclicShuffler(
+                self.class_to_pool[c], seed=self.seed, epoch=int(epoch), class_id=int(c)
+            )
 
         out = np.empty((nb, self.bs), dtype=np.int64)
 
@@ -298,7 +307,7 @@ class StreamingStratifiedBatchPlanProvider(PlanProvider):
             pos = 0
             for c, k in active:
                 idxs = shufflers[c].take(k)
-                out[b, pos:pos + k] = idxs
+                out[b, pos : pos + k] = idxs
                 pos += k
 
             if self.shuffle_within_batch:

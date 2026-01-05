@@ -1,4 +1,5 @@
 """Comprehensive tests for planfetch.dataset module."""
+
 import threading
 from pathlib import Path
 from typing import Dict, Tuple
@@ -13,12 +14,13 @@ from planfetch.dataset import S3PathDataset
 
 class FakeStreamingBody:
     """Mock for boto3 StreamingBody."""
+
     def __init__(self, data: bytes):
         self._data = data
 
     def iter_chunks(self, chunk_size: int = 1024):
         for i in range(0, len(self._data), chunk_size):
-            yield self._data[i:i + chunk_size]
+            yield self._data[i : i + chunk_size]
 
 
 class FakeS3Client:

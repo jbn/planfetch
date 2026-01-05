@@ -1,4 +1,5 @@
 """Comprehensive tests for planfetch.lightning module."""
+
 import sys
 from unittest.mock import Mock, MagicMock, patch
 

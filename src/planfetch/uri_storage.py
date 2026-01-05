@@ -122,7 +122,9 @@ class S3KeyList:
         return cls(prefix=expected_prefix, data=data, offsets=offsets)
 
     @classmethod
-    def from_prefix_iterable(cls, compact_prefix: str, uris: Iterable[str]) -> S3KeyList:
+    def from_prefix_iterable(
+        cls, compact_prefix: str, uris: Iterable[str]
+    ) -> S3KeyList:
         """
         Create from an iterable of URIs with an explicit prefix.
 
@@ -181,7 +183,9 @@ class S3KeyList:
         if idx < 0:
             idx = len(self) + idx
         if idx < 0 or idx >= len(self):
-            raise IndexError(f"index {idx} out of range for S3KeyList of length {len(self)}")
+            raise IndexError(
+                f"index {idx} out of range for S3KeyList of length {len(self)}"
+            )
         start = int(self._offsets[idx])
         end = int(self._offsets[idx + 1])
         suffix = self._data[start:end].decode("utf-8")
@@ -200,7 +204,9 @@ class S3KeyList:
         if idx < 0:
             idx = len(self) + idx
         if idx < 0 or idx >= len(self):
-            raise IndexError(f"index {idx} out of range for S3KeyList of length {len(self)}")
+            raise IndexError(
+                f"index {idx} out of range for S3KeyList of length {len(self)}"
+            )
         start = int(self._offsets[idx])
         end = int(self._offsets[idx + 1])
         return self._data[start:end].decode("utf-8")

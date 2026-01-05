@@ -1,4 +1,5 @@
 """Comprehensive tests for planfetch.io module."""
+
 import csv
 import os
 import tempfile
@@ -39,15 +40,9 @@ class TestLoadIndexCsv:
     def test_different_column_names(self, tmp_path):
         """Test with non-standard column names."""
         csv_path = tmp_path / "test.csv"
-        csv_path.write_text(
-            "uri,label\n"
-            "s3://b/k1,5\n"
-            "s3://b/k2,10\n"
-        )
+        csv_path.write_text("uri,label\n" "s3://b/k1,5\n" "s3://b/k2,10\n")
 
-        s3_uris, labels = load_index_csv(
-            csv_path, s3_uri_col="uri", class_col="label"
-        )
+        s3_uris, labels = load_index_csv(csv_path, s3_uri_col="uri", class_col="label")
 
         assert s3_uris == ["s3://b/k1", "s3://b/k2"]
         np.testing.assert_array_equal(labels, np.array([5, 10], dtype=np.int64))
@@ -138,10 +133,7 @@ class TestLoadIndexCsv:
         """Test that URI order is preserved."""
         csv_path = tmp_path / "test.csv"
         csv_path.write_text(
-            "s3_path,class_id\n"
-            "s3://b/z,0\n"
-            "s3://b/a,1\n"
-            "s3://b/m,2\n"
+            "s3_path,class_id\n" "s3://b/z,0\n" "s3://b/a,1\n" "s3://b/m,2\n"
         )
 
         s3_uris, labels = load_index_csv(
@@ -154,8 +146,7 @@ class TestLoadIndexCsv:
         """Test that extra columns are ignored."""
         csv_path = tmp_path / "test.csv"
         csv_path.write_text(
-            "extra1,s3_path,extra2,class_id,extra3\n"
-            "foo,s3://b/k,bar,5,baz\n"
+            "extra1,s3_path,extra2,class_id,extra3\n" "foo,s3://b/k,bar,5,baz\n"
         )
 
         s3_uris, labels = load_index_csv(
@@ -302,9 +293,7 @@ class TestLoadIndexCsv:
         """Test pack_uris=True with mixed buckets raises ValueError."""
         csv_path = tmp_path / "test.csv"
         csv_path.write_text(
-            "s3_path,class_id\n"
-            "s3://bucket1/key1,0\n"
-            "s3://bucket2/key2,1\n"
+            "s3_path,class_id\n" "s3://bucket1/key1,0\n" "s3://bucket2/key2,1\n"
         )
 
         with pytest.raises(ValueError, match="Mixed buckets"):
@@ -412,9 +401,7 @@ class TestLoadIndexCsv:
         """Test that prefix mismatch raises ValueError with index."""
         csv_path = tmp_path / "test.csv"
         csv_path.write_text(
-            "s3_path,class_id\n"
-            "s3://bucket/key1,0\n"
-            "s3://other-bucket/key2,1\n"
+            "s3_path,class_id\n" "s3://bucket/key1,0\n" "s3://other-bucket/key2,1\n"
         )
 
         with pytest.raises(ValueError, match="index 1"):
@@ -461,11 +448,13 @@ class TestLoadIndexDataframe:
 
     def test_basic_functionality(self):
         """Test basic DataFrame loading."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/key1", "s3://bucket/key2", "s3://bucket/key3"],
-            "class_id": [0, 1, 2],
-            "other_col": ["foo", "bar", "baz"],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/key1", "s3://bucket/key2", "s3://bucket/key3"],
+                "class_id": [0, 1, 2],
+                "other_col": ["foo", "bar", "baz"],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -480,14 +469,14 @@ class TestLoadIndexDataframe:
 
     def test_different_column_names(self):
         """Test with non-standard column names."""
-        df = pd.DataFrame({
-            "uri": ["s3://b/k1", "s3://b/k2"],
-            "label": [5, 10],
-        })
-
-        s3_uris, labels = load_index_dataframe(
-            df, s3_uri_col="uri", class_col="label"
+        df = pd.DataFrame(
+            {
+                "uri": ["s3://b/k1", "s3://b/k2"],
+                "label": [5, 10],
+            }
         )
+
+        s3_uris, labels = load_index_dataframe(df, s3_uri_col="uri", class_col="label")
 
         assert s3_uris == ["s3://b/k1", "s3://b/k2"]
         np.testing.assert_array_equal(labels, np.array([5, 10], dtype=np.int64))
@@ -506,10 +495,12 @@ class TestLoadIndexDataframe:
 
     def test_single_row(self):
         """Test with single data row."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/single"],
-            "class_id": [42],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/single"],
+                "class_id": [42],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -520,10 +511,12 @@ class TestLoadIndexDataframe:
 
     def test_large_class_ids(self):
         """Test with large class IDs."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://b/k"],
-            "class_id": [999999],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://b/k"],
+                "class_id": [999999],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -533,10 +526,12 @@ class TestLoadIndexDataframe:
 
     def test_negative_class_ids(self):
         """Test with negative class IDs (edge case)."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://b/k"],
-            "class_id": [-1],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://b/k"],
+                "class_id": [-1],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -546,10 +541,12 @@ class TestLoadIndexDataframe:
 
     def test_dtype_is_int64(self):
         """Test that labels are returned as int64."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://b/k"],
-            "class_id": [1],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://b/k"],
+                "class_id": [1],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -559,10 +556,12 @@ class TestLoadIndexDataframe:
 
     def test_preserves_uri_order(self):
         """Test that URI order is preserved."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://b/z", "s3://b/a", "s3://b/m"],
-            "class_id": [0, 1, 2],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://b/z", "s3://b/a", "s3://b/m"],
+                "class_id": [0, 1, 2],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -572,13 +571,15 @@ class TestLoadIndexDataframe:
 
     def test_extra_columns_ignored(self):
         """Test that extra columns are ignored."""
-        df = pd.DataFrame({
-            "extra1": ["foo"],
-            "s3_path": ["s3://b/k"],
-            "extra2": ["bar"],
-            "class_id": [5],
-            "extra3": ["baz"],
-        })
+        df = pd.DataFrame(
+            {
+                "extra1": ["foo"],
+                "s3_path": ["s3://b/k"],
+                "extra2": ["bar"],
+                "class_id": [5],
+                "extra3": ["baz"],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -589,40 +590,48 @@ class TestLoadIndexDataframe:
 
     def test_missing_s3_uri_column(self):
         """Test error when s3_uri_col is missing."""
-        df = pd.DataFrame({
-            "other_col": ["foo"],
-            "class_id": [1],
-        })
+        df = pd.DataFrame(
+            {
+                "other_col": ["foo"],
+                "class_id": [1],
+            }
+        )
 
         with pytest.raises(ValueError, match="missing required columns"):
             load_index_dataframe(df, s3_uri_col="s3_path", class_col="class_id")
 
     def test_missing_class_column(self):
         """Test error when class_col is missing."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://b/k"],
-            "other_col": ["foo"],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://b/k"],
+                "other_col": ["foo"],
+            }
+        )
 
         with pytest.raises(ValueError, match="missing required columns"):
             load_index_dataframe(df, s3_uri_col="s3_path", class_col="class_id")
 
     def test_missing_both_columns(self):
         """Test error when both required columns are missing."""
-        df = pd.DataFrame({
-            "col1": ["foo"],
-            "col2": ["bar"],
-        })
+        df = pd.DataFrame(
+            {
+                "col1": ["foo"],
+                "col2": ["bar"],
+            }
+        )
 
         with pytest.raises(ValueError, match="missing required columns"):
             load_index_dataframe(df, s3_uri_col="s3_path", class_col="class_id")
 
     def test_float_class_id_converts(self):
         """Test that float class IDs are converted to int."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://b/k"],
-            "class_id": [5.0],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://b/k"],
+                "class_id": [5.0],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -634,10 +643,12 @@ class TestLoadIndexDataframe:
     def test_many_rows(self):
         """Test with many rows."""
         n = 10000
-        df = pd.DataFrame({
-            "s3_path": [f"s3://bucket/key{i}" for i in range(n)],
-            "class_id": [i % 100 for i in range(n)],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": [f"s3://bucket/key{i}" for i in range(n)],
+                "class_id": [i % 100 for i in range(n)],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -650,10 +661,12 @@ class TestLoadIndexDataframe:
 
     def test_return_types(self):
         """Test that return types are correct."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://b/k"],
-            "class_id": [1],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://b/k"],
+                "class_id": [1],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df, s3_uri_col="s3_path", class_col="class_id"
@@ -667,10 +680,12 @@ class TestLoadIndexDataframe:
 
     def test_pack_uris_infers_prefix(self):
         """Test pack_uris=True without compact_prefix infers prefix from URIs."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/key1", "s3://bucket/key2", "s3://bucket/key3"],
-            "class_id": [0, 1, 2],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/key1", "s3://bucket/key2", "s3://bucket/key3"],
+                "class_id": [0, 1, 2],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df,
@@ -689,10 +704,12 @@ class TestLoadIndexDataframe:
 
     def test_pack_uris_mixed_buckets_raises(self):
         """Test pack_uris=True with mixed buckets raises ValueError."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket1/key1", "s3://bucket2/key2"],
-            "class_id": [0, 1],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket1/key1", "s3://bucket2/key2"],
+                "class_id": [0, 1],
+            }
+        )
 
         with pytest.raises(ValueError, match="Mixed buckets"):
             load_index_dataframe(
@@ -704,10 +721,12 @@ class TestLoadIndexDataframe:
 
     def test_pack_uris_false_returns_list(self):
         """Test pack_uris=False (default) returns List[str]."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/key1"],
-            "class_id": [0],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/key1"],
+                "class_id": [0],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df,
@@ -721,10 +740,12 @@ class TestLoadIndexDataframe:
 
     def test_compact_prefix_ignored_when_pack_uris_false(self):
         """Test that compact_prefix is ignored when pack_uris=False."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/key1"],
-            "class_id": [0],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/key1"],
+                "class_id": [0],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df,
@@ -739,10 +760,12 @@ class TestLoadIndexDataframe:
 
     def test_pack_uris_with_compact_prefix(self):
         """Test pack_uris=True with explicit compact_prefix."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/key1", "s3://bucket/key2", "s3://bucket/key3"],
-            "class_id": [0, 1, 2],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/key1", "s3://bucket/key2", "s3://bucket/key3"],
+                "class_id": [0, 1, 2],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df,
@@ -761,10 +784,12 @@ class TestLoadIndexDataframe:
 
     def test_pack_uris_compact_prefix_trailing_slash(self):
         """Test pack_uris with compact_prefix with trailing slash."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/key1"],
-            "class_id": [0],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/key1"],
+                "class_id": [0],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df,
@@ -779,13 +804,15 @@ class TestLoadIndexDataframe:
 
     def test_pack_uris_compact_prefix_partial_path(self):
         """Test pack_uris with partial path prefix."""
-        df = pd.DataFrame({
-            "s3_path": [
-                "s3://bucket/data/train/img1.jpg",
-                "s3://bucket/data/train/img2.jpg",
-            ],
-            "class_id": [0, 1],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": [
+                    "s3://bucket/data/train/img1.jpg",
+                    "s3://bucket/data/train/img2.jpg",
+                ],
+                "class_id": [0, 1],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df,
@@ -801,10 +828,12 @@ class TestLoadIndexDataframe:
 
     def test_pack_uris_compact_prefix_mismatch_raises(self):
         """Test that prefix mismatch raises ValueError with index."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/key1", "s3://other-bucket/key2"],
-            "class_id": [0, 1],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/key1", "s3://other-bucket/key2"],
+                "class_id": [0, 1],
+            }
+        )
 
         with pytest.raises(ValueError, match="index 1"):
             load_index_dataframe(
@@ -817,10 +846,12 @@ class TestLoadIndexDataframe:
 
     def test_pack_uris_bucket_property(self):
         """Test that S3KeyList.bucket property works."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://mybucket/key"],
-            "class_id": [0],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://mybucket/key"],
+                "class_id": [0],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df,
@@ -847,10 +878,12 @@ class TestLoadIndexDataframe:
 
     def test_pack_uris_iteration(self):
         """Test that S3KeyList supports iteration."""
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/key1", "s3://bucket/key2"],
-            "class_id": [0, 1],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/key1", "s3://bucket/key2"],
+                "class_id": [0, 1],
+            }
+        )
 
         s3_uris, labels = load_index_dataframe(
             df,

@@ -1,4 +1,5 @@
 """Comprehensive tests for planfetch.uri_storage module."""
+
 import numpy as np
 import pytest
 
@@ -400,9 +401,7 @@ class TestS3KeyListWithIO:
 
         csv_path = tmp_path / "test.csv"
         csv_path.write_text(
-            "s3_path,class_id\n"
-            "s3://bucket1/a.jpg,0\n"
-            "s3://bucket2/b.jpg,1\n"
+            "s3_path,class_id\n" "s3://bucket1/a.jpg,0\n" "s3://bucket2/b.jpg,1\n"
         )
 
         with pytest.raises(ValueError, match="index 1"):
@@ -420,10 +419,12 @@ class TestS3KeyListWithIO:
 
         from planfetch.io import load_index_dataframe
 
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/a.jpg", "s3://bucket/b.jpg"],
-            "class_id": [0, 1],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/a.jpg", "s3://bucket/b.jpg"],
+                "class_id": [0, 1],
+            }
+        )
 
         keys, labels = load_index_dataframe(
             df,
@@ -443,10 +444,12 @@ class TestS3KeyListWithIO:
 
         from planfetch.io import load_index_dataframe
 
-        df = pd.DataFrame({
-            "s3_path": ["s3://bucket/a.jpg", "s3://bucket/b.jpg"],
-            "class_id": [0, 1],
-        })
+        df = pd.DataFrame(
+            {
+                "s3_path": ["s3://bucket/a.jpg", "s3://bucket/b.jpg"],
+                "class_id": [0, 1],
+            }
+        )
 
         keys, labels = load_index_dataframe(
             df,

@@ -1,4 +1,5 @@
 """Tests for planfetch.cache module."""
+
 import threading
 from pathlib import Path
 from typing import Dict, Tuple
@@ -27,18 +28,20 @@ def test_assert_rust_backend_when_available():
 
 class FakeStreamingBody:
     """Mock for boto3 StreamingBody."""
+
     def __init__(self, data: bytes):
         self._data = data
 
     def iter_chunks(self, chunk_size: int = 1024):
         for i in range(0, len(self._data), chunk_size):
-            yield self._data[i:i + chunk_size]
+            yield self._data[i : i + chunk_size]
 
 
 class FakeS3Client:
     """
     Minimal mock for boto3 S3 client. Stores objects in-memory as bytes.
     """
+
     def __init__(self, objects: Dict[Tuple[str, str], bytes]):
         self.objects = dict(objects)
         self.calls = []

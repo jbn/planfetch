@@ -18,6 +18,7 @@ from filelock import FileLock
 # Try to import Rust extension for high-performance downloads
 try:
     from .planfetch_rs import RustS3Cache  # type: ignore[import-not-found]
+
     HAS_RUST = True
 except ImportError:
     HAS_RUST = False
@@ -132,10 +133,12 @@ class SharedDiskCache:
 
     def _track_future(self, key: str, fut: Future) -> None:
         """Ensure inflight entries get removed when the Future completes."""
+
         def _cleanup(_f: Future) -> None:
             with self._inflight_lock:
                 if self._inflight.get(key) is _f:
                     self._inflight.pop(key, None)
+
         fut.add_done_callback(_cleanup)
 
     def _path_for(self, s3_uri: str) -> Path:
@@ -145,7 +148,9 @@ class SharedDiskCache:
         return sub / h
 
     def _lock_for(self, s3_uri: str) -> FileLock:
-        return FileLock(str(self.cache_dir / "_locks" / (_sha256_hex(s3_uri) + ".lock")))
+        return FileLock(
+            str(self.cache_dir / "_locks" / (_sha256_hex(s3_uri) + ".lock"))
+        )
 
     def _touch(self, s3_uri: str, path: Path) -> None:
         h = _sha256_hex(s3_uri)
@@ -161,7 +166,7 @@ class SharedDiskCache:
                 self._total_bytes += st.st_size
             else:
                 if prev.size != st.st_size:
-                    self._total_bytes += (st.st_size - prev.size)
+                    self._total_bytes += st.st_size - prev.size
                     prev.size = st.st_size
                 prev.atime = now
                 prev.path = str(path)
@@ -251,16 +256,22 @@ class SharedDiskCache:
                 return str(dst)
 
             bucket, key = parse_s3_uri(s3_uri)
-            tmp = self.cache_dir / "_tmp" / f"{dst.name}.{os.getpid()}.{time.time_ns()}.tmp"
+            tmp = (
+                self.cache_dir
+                / "_tmp"
+                / f"{dst.name}.{os.getpid()}.{time.time_ns()}.tmp"
+            )
 
             backoff = 0.25
             for attempt in range(6):
                 try:
                     # Use get_object() instead of download_file() for less overhead
                     response = self.s3.get_object(Bucket=bucket, Key=key)
-                    with open(tmp, 'wb') as f:
+                    with open(tmp, "wb") as f:
                         # Read in chunks to avoid holding large objects in memory
-                        for chunk in response['Body'].iter_chunks(chunk_size=1024 * 1024):
+                        for chunk in response["Body"].iter_chunks(
+                            chunk_size=1024 * 1024
+                        ):
                             f.write(chunk)
                     os.replace(str(tmp), str(dst))  # atomic
                     self._touch(s3_uri, dst)
@@ -281,8 +292,8 @@ class SharedDiskCache:
         self,
         *,
         keep_uris: Sequence[str],
-        mode: str = "window",         # "window" or "pressure"
-        backend: str = "meta",        # "meta" or "scan"
+        mode: str = "window",  # "window" or "pressure"
+        backend: str = "meta",  # "meta" or "scan"
     ) -> None:
         """
         Prune cache entries.
@@ -307,7 +318,9 @@ class SharedDiskCache:
 
         if backend == "scan":
             if mode != "window":
-                raise ValueError("backend='scan' currently supports mode='window' only.")
+                raise ValueError(
+                    "backend='scan' currently supports mode='window' only."
+                )
             self._prune_scan_window(keep_hashes)
             return
 

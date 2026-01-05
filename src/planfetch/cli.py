@@ -131,9 +131,7 @@ def cli() -> None:
 @cli.command()
 @click.argument("csv_path", type=click.Path(exists=True))
 # CSV selection options
-@click.option(
-    "-n", "--limit", type=int, default=None, help="Process only first N rows"
-)
+@click.option("-n", "--limit", type=int, default=None, help="Process only first N rows")
 @click.option("--offset", type=int, default=0, help="Skip first N rows")
 @click.option(
     "--sample-frac",

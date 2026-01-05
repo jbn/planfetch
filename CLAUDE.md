@@ -4,7 +4,7 @@
     - Use `pytest` for testing.
 - Follow TDD. 
     - Write the test first; then implement it; then make sure tests pass.
-    - After tests pass use `uv run ty` to fix any type issues
+    - After tests pass use `uv run ty check` to fix any type issues and `uv run black` to format code
 
 ## Project Overview
 

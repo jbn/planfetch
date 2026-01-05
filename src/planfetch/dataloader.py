@@ -16,6 +16,7 @@ class PlanBatchSampler(BatchSampler):
     """
     BatchSampler that yields batches from a PlanView.
     """
+
     def __init__(self, plan: PlanView):
         self.plan = plan
 
@@ -104,13 +105,16 @@ class PrefetchCoordinator:
 
         self._step += 1
         if self._step % self.prune_every == 0:
-            self.cache.prune(keep_uris=keep, mode=self.prune_mode, backend=self.prune_backend)
+            self.cache.prune(
+                keep_uris=keep, mode=self.prune_mode, backend=self.prune_backend
+            )
 
 
 class PrefetchingLoader:
     """
     Wrap a DataLoader and automatically advance prefetching per yielded batch.
     """
+
     def __init__(self, dataloader: DataLoader, prefetch: PrefetchCoordinator):
         self.dataloader = dataloader
         self.prefetch = prefetch
@@ -128,7 +132,13 @@ class PrefetchController:
     """
     One method per epoch: set_epoch(epoch).
     """
-    def __init__(self, plan_provider: PlanProvider, batch_sampler: PlanBatchSampler, prefetch: PrefetchCoordinator):
+
+    def __init__(
+        self,
+        plan_provider: PlanProvider,
+        batch_sampler: PlanBatchSampler,
+        prefetch: PrefetchCoordinator,
+    ):
         self.plan_provider = plan_provider
         self.batch_sampler = batch_sampler
         self.prefetch = prefetch

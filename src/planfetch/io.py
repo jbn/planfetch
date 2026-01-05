@@ -57,7 +57,9 @@ def load_index_csv(
         if reader.fieldnames is None:
             raise ValueError("CSV has no header row.")
         if s3_uri_col not in reader.fieldnames or class_col not in reader.fieldnames:
-            raise ValueError(f"CSV missing required columns. Found: {reader.fieldnames}")
+            raise ValueError(
+                f"CSV missing required columns. Found: {reader.fieldnames}"
+            )
 
     # Read all data
     uris: List[str] = []
