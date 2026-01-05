@@ -230,6 +230,115 @@ for epoch in range(10):
         pass
 ```
 
+### Using your own Dataset (minimal integration)
+
+The convenience classes above (`S3PathDataset`, `build_prefetching_dataloader`) are optional.
+If you want full control over your Dataset and training loop, here's what planfetch actually needs:
+
+```python
+import planfetch as pf
+from torch.utils.data import Dataset, DataLoader
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1: Create the cache (same as before)
+# ─────────────────────────────────────────────────────────────────────────────
+cache = pf.SharedDiskCache(
+    "/mnt/nvme/s3cache_train",
+    max_bytes=int(0.8 * nvme_bytes),
+    download_threads=64,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2: Your custom Dataset
+#
+# The ONLY integration point is calling cache.ensure_local() in __getitem__.
+# This returns a local file path, downloading from S3 if not already cached.
+# ─────────────────────────────────────────────────────────────────────────────
+class MyDataset(Dataset):
+    def __init__(self, s3_uris, labels, cache):
+        self.s3_uris = s3_uris
+        self.labels = labels
+        self.cache = cache
+
+    def __len__(self):
+        return len(self.s3_uris)
+
+    def __getitem__(self, idx):
+        # This is the only planfetch call in your Dataset.
+        # ensure_local() returns immediately if cached, otherwise downloads first.
+        local_path = self.cache.ensure_local(self.s3_uris[idx])
+
+        # Your preprocessing - completely up to you
+        image = your_image_loader(local_path)
+        image = your_transforms(image)
+        return image, self.labels[idx]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3: Set up prefetching
+#
+# PlanProvider: defines which samples go in which batch (handles shuffling)
+# PlanBatchSampler: feeds those batches to DataLoader
+# PrefetchCoordinator: downloads batches ahead of where you are
+# ─────────────────────────────────────────────────────────────────────────────
+plan_provider = pf.ShuffleOncePerEpochPlanProvider(
+    n=len(train_uris),
+    batch_size=256,
+)
+batch_sampler = pf.PlanBatchSampler(plan_provider.make_epoch_plan(0))
+
+prefetch = pf.PrefetchCoordinator(
+    cache=cache,
+    s3_uris=train_uris,
+    batches_ahead=200,   # prefetch 200 batches ahead of current position
+    batches_back=10,     # keep 10 batches behind (for stragglers)
+    prune_every=5,       # clean up old files every 5 batches
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4: Standard PyTorch DataLoader
+#
+# The only difference from vanilla PyTorch: use batch_sampler instead of
+# shuffle=True. This is how prefetch knows which files to download next.
+# ─────────────────────────────────────────────────────────────────────────────
+dataloader = DataLoader(
+    MyDataset(train_uris, train_labels, cache),
+    batch_sampler=batch_sampler,  # <-- replaces shuffle=True
+    num_workers=8,
+    pin_memory=True,
+    persistent_workers=True,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 5: Your training loop
+#
+# Two additions per epoch:
+#   1. At epoch start: update the plan (new shuffle order)
+#   2. After each batch: tell prefetch to advance its window
+# ─────────────────────────────────────────────────────────────────────────────
+for epoch in range(num_epochs):
+    # Update batch order for this epoch (new shuffle)
+    plan = plan_provider.make_epoch_plan(epoch)
+    batch_sampler.set_plan(plan)
+    prefetch.set_plan(plan)
+    prefetch.prime()  # start downloading first batches
+
+    for batch_idx, (images, labels_batch) in enumerate(dataloader):
+        # ── Your training code, unchanged ──
+        loss = model(images, labels_batch)
+        loss.backward()
+        optimizer.step()
+
+        # Tell prefetch we finished this batch (advances download window)
+        prefetch.on_batch_yielded(batch_idx)
+```
+
+**What's actually required:**
+1. `cache.ensure_local(uri)` in your Dataset's `__getitem__`
+2. `batch_sampler=PlanBatchSampler(...)` in DataLoader
+3. `prefetch.on_batch_yielded(batch_idx)` after each training step
+
+Everything else (your transforms, your model, your optimizer) stays exactly as you wrote it.
+
 ---
 
 ## Val/test loaders (same pattern)
