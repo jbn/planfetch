@@ -17,7 +17,7 @@ from filelock import FileLock
 
 # Try to import Rust extension for high-performance downloads
 try:
-    from .planfetch_rs import RustS3Cache
+    from .planfetch_rs import RustS3Cache  # type: ignore[import-not-found]
     HAS_RUST = True
 except ImportError:
     HAS_RUST = False

@@ -22,7 +22,7 @@ class PlanBatchSampler(BatchSampler):
     def set_plan(self, plan: PlanView) -> None:
         self.plan = plan
 
-    def __iter__(self) -> Iterator[np.ndarray]:
+    def __iter__(self) -> Iterator[np.ndarray]:  # type: ignore[override]
         for i in range(len(self.plan)):
             yield self.plan.batch(i)
 
@@ -181,7 +181,7 @@ def build_prefetching_dataloader(
 
     dl = DataLoader(
         dataset,
-        batch_sampler=sampler,
+        batch_sampler=sampler,  # type: ignore[arg-type]
         num_workers=int(num_workers),
         pin_memory=bool(pin_memory),
         persistent_workers=bool(persistent_workers),

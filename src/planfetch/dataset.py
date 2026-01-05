@@ -2,16 +2,17 @@
 """PyTorch Dataset wrapper for S3-backed data."""
 from __future__ import annotations
 
-from typing import Sequence, Union
+from typing import Any, Sequence, Tuple, Union
 
 import numpy as np
+from numpy.typing import ArrayLike
 from torch.utils.data import Dataset
 
 from .cache import SharedDiskCache
 from .uri_storage import S3KeyList, S3URISequence
 
 
-class S3PathDataset(Dataset):
+class S3PathDataset(Dataset[Tuple[Any, int]]):
     """
     Dataset: idx -> (image, label)
 
@@ -24,7 +25,7 @@ class S3PathDataset(Dataset):
     def __init__(
         self,
         s3_uris: S3URISequence,
-        labels: Sequence[int],
+        labels: Union[Sequence[int], ArrayLike],
         *,
         cache: SharedDiskCache,
         image_loader,
@@ -48,7 +49,7 @@ class S3PathDataset(Dataset):
     def __len__(self) -> int:
         return len(self._uri_storage)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx):  # type: ignore[override]
         i = int(idx)
         uri = self._uri_storage[i]
         path = self.cache.ensure_local(uri)

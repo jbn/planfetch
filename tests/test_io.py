@@ -439,6 +439,7 @@ class TestLoadIndexCsv:
             compact_prefix="s3://mybucket",
         )
 
+        assert isinstance(s3_uris, S3KeyList)
         assert s3_uris.bucket == "mybucket"
 
     def test_pack_uris_empty_csv_raises(self, tmp_path):
@@ -829,6 +830,7 @@ class TestLoadIndexDataframe:
             compact_prefix="s3://mybucket",
         )
 
+        assert isinstance(s3_uris, S3KeyList)
         assert s3_uris.bucket == "mybucket"
 
     def test_pack_uris_empty_df_raises(self):
