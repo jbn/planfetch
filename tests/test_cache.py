@@ -1,5 +1,6 @@
 """Tests for planfetch.cache module."""
 
+import json
 import threading
 from pathlib import Path
 from typing import Dict, Tuple
@@ -438,6 +439,7 @@ def test_rust_backend_stats_and_path_for(tmp_path, monkeypatch):
         "retries",
         "throttled",
         "failures",
+        "not_found",
         "downloaded",
         "bytes",
         "inflight",
@@ -515,3 +517,80 @@ def test_object_lock_held_across_fork_is_released_for_the_child(tmp_path):
     if p.is_alive():
         p.kill()
     assert res == "acquired"
+
+
+# --------------------------------------------------------------------------- #
+# Rust extension API used by the Python side (no S3 needed).
+# --------------------------------------------------------------------------- #
+
+
+def _rust_cache(tmp_path, monkeypatch, **kw):
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    from planfetch.planfetch_rs import RustS3Cache
+
+    return RustS3Cache(str(tmp_path / "cache"), 4, **kw)
+
+
+@pytest.mark.skipif(not has_rust_backend(), reason="Rust backend not built")
+def test_rust_wait_for_path_times_out_then_returns_when_the_file_appears(
+    tmp_path, monkeypatch
+):
+    rc = _rust_cache(tmp_path, monkeypatch)
+    uri = "s3://b/waited"
+    p = Path(rc.path_for(uri))
+    t0 = time.perf_counter()
+    assert rc.wait_for_path(uri, 50) is False
+    assert 0.04 < time.perf_counter() - t0 < 1.0
+
+    def writer():
+        time.sleep(0.1)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+
+    threading.Thread(target=writer, daemon=True).start()
+    t0 = time.perf_counter()
+    assert rc.wait_for_path(uri, 5000) is True
+    assert time.perf_counter() - t0 < 2.0
+
+
+@pytest.mark.skipif(not has_rust_backend(), reason="Rust backend not built")
+def test_rust_drop_paths_unlinks_in_the_background_and_wait_covers_it(
+    tmp_path, monkeypatch
+):
+    rc = _rust_cache(tmp_path, monkeypatch)
+    uris = [f"s3://b/k{i}" for i in range(50)]
+    paths = [Path(rc.path_for(u)) for u in uris]
+    for p in paths:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    rc.drop_paths(uris + ["s3://b/never-existed"])  # missing files are ignored
+    rc.wait_for_inflight()  # also waits for pending unlinks
+    assert not any(p.exists() for p in paths)
+    rc.drop_paths(uris)  # dropping again is a no-op, not an error
+    rc.wait_for_inflight()
+
+
+@pytest.mark.skipif(not has_rust_backend(), reason="Rust backend not built")
+def test_rust_stats_dump_writes_json_with_pid(tmp_path, monkeypatch):
+    rc = _rust_cache(tmp_path, monkeypatch)
+    out = tmp_path / "stats.json"
+    rc.stats_dump(str(out))
+    d = json.loads(out.read_text())
+    assert d["pid"] == os.getpid()
+    assert d["attempts"] == 0 and d["not_found"] == 0 and d["inflight"] == 0
+    assert set(d) == set(rc.stats()) | {"pid"}
+    assert not list(tmp_path.glob("*.tmp"))  # written atomically
+
+
+@pytest.mark.skipif(not has_rust_backend(), reason="Rust backend not built")
+def test_rust_worker_threads_argument(tmp_path, monkeypatch):
+    rc = _rust_cache(tmp_path, monkeypatch)
+    assert rc.worker_threads is None
+    small = _rust_cache(tmp_path, monkeypatch, worker_threads=1)
+    assert small.worker_threads == 1
+    # A 1-thread runtime still serves requests (a local miss on a fake bucket
+    # needs the network, so only exercise the non-network calls here).
+    assert small.wait_for_path("s3://b/none", 10) is False
+    small.drop_paths(["s3://b/none"])
+    small.wait_for_inflight()
