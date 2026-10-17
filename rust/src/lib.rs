@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,10 +38,28 @@ impl Drop for InflightGuard {
 struct Downloader {
     client: Client,
     cache_dir: PathBuf,
-    runtime: Runtime,
+    /// Dropped only by the process that created it; see `impl Drop`.
+    runtime: ManuallyDrop<Runtime>,
     semaphore: Arc<Semaphore>,
     inflight: Arc<DashSet<String>>,
     stats: Arc<Stats>,
+    /// The process that built the runtime (its worker threads live only there).
+    owner_pid: u32,
+}
+
+impl Drop for Downloader {
+    fn drop(&mut self) {
+        // A forked child (a DataLoader worker with the default start method)
+        // inherits this struct but none of the runtime's threads. Dropping the
+        // runtime there blocks forever: tokio's blocking-pool shutdown waits for
+        // worker threads that do not exist in this process. So only the owning
+        // process drops the runtime; a child leaks the inherited one (it holds
+        // no file descriptors the child uses) and builds its own.
+        if std::process::id() == self.owner_pid {
+            // SAFETY: dropped exactly once, here, and never used afterwards.
+            unsafe { ManuallyDrop::drop(&mut self.runtime) };
+        }
+    }
 }
 
 impl Downloader {
@@ -56,10 +75,11 @@ impl Downloader {
         Ok(Self {
             client,
             cache_dir: PathBuf::from(cache_dir),
-            runtime,
+            runtime: ManuallyDrop::new(runtime),
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             inflight: Arc::new(DashSet::new()),
             stats: Arc::new(Stats::default()),
+            owner_pid: std::process::id(),
         })
     }
 
