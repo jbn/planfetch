@@ -382,6 +382,50 @@ def test_forked_child_rebuilds_backend(tmp_path):
     assert Path(cache.ensure_local("s3://b/k2")).read_bytes() == b"world"
 
 
+def _child_rust_stats(cache, q):
+    try:
+        s = cache.stats()  # rebuilds the backend in the child
+        q.put({"pid_ok": cache._pid == os.getpid(), "inflight": s["inflight"]})
+    except Exception as e:  # pragma: no cover - reported to the parent
+        q.put({"error": repr(e)})
+
+
+@pytest.mark.skipif(not has_rust_backend(), reason="Rust backend not built")
+def test_rust_backend_forked_child_does_not_hang_dropping_parent_runtime(
+    tmp_path, monkeypatch
+):
+    """A forked DataLoader worker inherits the parent's RustS3Cache and replaces
+    it on first use. Dropping the inherited tokio runtime in the child blocks
+    forever: tokio's blocking pool waits for worker threads that only exist in
+    the parent. The child must leak the inherited runtime instead."""
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    cache = SharedDiskCache(tmp_path / "cache", max_bytes=1_000, download_threads=2)
+    assert cache._use_rust
+    cache.stats()  # the runtime exists in the parent before the fork
+
+    ctx = multiprocessing.get_context("fork")
+    q = ctx.Queue()
+    p = ctx.Process(target=_child_rust_stats, args=(cache, q))
+    p.daemon = True
+    p.start()
+    try:
+        res = q.get(timeout=30)
+    except Exception:
+        res = {"error": "child did not answer (hang dropping the inherited runtime)"}
+    p.join(timeout=10)
+    alive = p.is_alive()
+    if alive:
+        p.kill()
+    assert "error" not in res, res
+    assert res["pid_ok"]
+    assert res["inflight"] == 0
+    assert not alive, "child did not exit (hang at interpreter shutdown)"
+    # The parent still owns a working runtime.
+    assert cache._pid == os.getpid()
+    assert cache.stats()["inflight"] == 0
+
+
 @pytest.mark.skipif(not has_rust_backend(), reason="Rust backend not built")
 def test_rust_backend_stats_and_path_for(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_REGION", "us-east-1")
