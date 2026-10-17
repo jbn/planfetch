@@ -228,6 +228,40 @@ The cache object is shared with DataLoader workers as-is. It rebuilds its downlo
 larger than `num_workers * prefetch_factor`; otherwise workers read batches the window has
 already dropped, and `build_prefetching_dataloader` raises.
 
+Workers wait, they do not download. Under this loader a cache miss in a worker is a file the
+parent is already fetching, so `build_prefetching_dataloader` sets `miss_wait_seconds=30` on
+the dataset (when it has that attribute and it is 0): the worker polls for the file and only
+downloads it itself after the timeout. A worker that does download gets a small backend
+(`worker_download_threads=8`, and a `worker_runtime_threads=2` tokio runtime on the Rust
+side) instead of one sized for the parent. Per-step eviction goes through `cache.drop_async`
+(a background unlink), so the coordinator costs the training thread about a millisecond.
+
+### Errors and counters
+
+A key that does not exist raises `pf.S3ObjectMissing` on the first attempt (no retries);
+AccessDenied raises `pf.S3AccessDenied`; any other 4xx raises `pf.S3TerminalError`. All three
+carry `.uri`, `.code` and `.status`. 5xx, `SlowDown` and connection errors are retried six
+times with backoff. To keep training going past a dead key, give the dataset an `on_error`:
+
+```python
+train_ds = pf.S3PathDataset(
+    train_uris, train_labels, cache=cache, image_loader=load_rgb, transform=train_tf,
+    on_error=lambda idx, exc: (idx + 1) % len(train_uris),   # substitute the next sample
+)
+```
+
+`cache.stats()` is per process. Every process writes its counters to
+`<cache_dir>/_stats/<pid>.json` after a download (at most every 2 s), and
+`cache.stats(all_processes=True)` sums them with the live counters of the calling process,
+adding a `processes` count. Read that one at the end of an epoch to see what the workers did;
+`retries`, `throttled`, `failures` and `not_found` should all be 0 on a healthy index.
+
+### Checking against real S3
+
+The unit suite runs on a fake S3 client, so it cannot see what the Rust backend does inside a
+forked worker. Before a release, run `scripts/s3_loader_check.py` against a real bucket
+(fork, spawn, a second epoch); its docstring lists the pass criteria.
+
 ### 6) Training loop (minimal intrusion)
 ```python
 for epoch in range(10):
@@ -615,7 +649,8 @@ The Rust backend is **enabled by default** when:
 # Rust backend enabled automatically
 cache = pf.SharedDiskCache("/mnt/nvme/cache", download_threads=128)
 
-# Explicitly disable Rust backend
+# Explicitly disable Rust backend (diagnostic only: boto3 threads hold the GIL and
+# starve the training thread, so its throughput is not what a training loop sees)
 cache = pf.SharedDiskCache("/mnt/nvme/cache", use_rust=False)
 
 # Custom s3_client forces Python backend

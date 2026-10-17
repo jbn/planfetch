@@ -12,6 +12,9 @@ This package provides:
 
 from .cache import (
     CacheMeta,
+    S3AccessDenied,
+    S3ObjectMissing,
+    S3TerminalError,
     SharedDiskCache,
     assert_rust_backend,
     has_rust_backend,
@@ -45,6 +48,9 @@ except Exception:
 __all__ = [
     # Cache
     "CacheMeta",
+    "S3AccessDenied",
+    "S3ObjectMissing",
+    "S3TerminalError",
     "SharedDiskCache",
     "assert_rust_backend",
     "has_rust_backend",

@@ -33,7 +33,10 @@ class PlanBatchSampler(BatchSampler):
 
 
 class PrefetchCache(Protocol):
-    """What PrefetchCoordinator needs from a cache (SharedDiskCache satisfies it)."""
+    """What PrefetchCoordinator needs from a cache (SharedDiskCache satisfies it).
+
+    `drop_async` is optional: when the cache has it, per-step eviction goes
+    through it and leaves the training thread; otherwise `drop` is used."""
 
     def prime_prefetch(self, s3_uris: Sequence[str]) -> None: ...
 
@@ -102,6 +105,7 @@ class PrefetchCoordinator:
 
         self.plan: Optional[PlanView] = None
         self._step = 0
+        self._drop = getattr(cache, "drop_async", None) or cache.drop
         # Incremental window state (see _advance).
         self._counts: Counter[str] = Counter()  # uri -> batches in window using it
         self._primed_hi = 0  # batches [0, _primed_hi) have been primed
@@ -168,7 +172,7 @@ class PrefetchCoordinator:
         gone = sorted(u for u in self._stale if u not in self._counts)
         self._stale.clear()
         if gone:
-            self.cache.drop(gone)
+            self._drop(gone)
 
     def _advance(self, batch_idx: int) -> None:
         """Bring the on-disk window to [batch_idx - Bb, batch_idx + Ba)."""
@@ -199,7 +203,7 @@ class PrefetchCoordinator:
                 else:
                     self._counts[u] = c
             if gone:
-                self.cache.drop(gone)
+                self._drop(gone)
 
         self._flush_stale()
         self._last_idx = batch_idx
@@ -285,6 +289,7 @@ def build_prefetching_dataloader(
     persistent_workers: bool = True,
     worker_init_fn=None,
     prefetch_factor: Optional[int] = None,
+    miss_wait_seconds: float = 30.0,
 ) -> Tuple[PrefetchingLoader, PrefetchController]:
     """
     Create:
@@ -300,7 +305,20 @@ def build_prefetching_dataloader(
 
     The cache is shared with the workers as-is: SharedDiskCache rebuilds its
     download backend per process, so no worker_init_fn is needed for it.
+
+    Under this loader a cache miss in a worker is almost always a file the
+    parent is already downloading, so if `dataset` has a `miss_wait_seconds`
+    attribute left at 0 it is set to `miss_wait_seconds`: the worker waits for
+    the file instead of fetching it a second time. A non-zero value already on
+    the dataset is kept.
     """
+    if (
+        miss_wait_seconds > 0
+        and hasattr(dataset, "miss_wait_seconds")
+        and not getattr(dataset, "miss_wait_seconds")
+    ):
+        dataset.miss_wait_seconds = float(miss_wait_seconds)  # type: ignore[attr-defined]
+
     plan0 = plan_provider.make_epoch_plan(0)
     sampler = PlanBatchSampler(plan0)
 

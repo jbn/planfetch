@@ -247,6 +247,7 @@ def test_stats_count_downloads_and_bytes(tmp_path):
         "retries": 0,
         "throttled": 0,
         "failures": 0,
+        "not_found": 0,
         "downloaded": 0,
         "bytes": 0,
         "inflight": 0,
@@ -527,7 +528,7 @@ def test_object_lock_held_across_fork_is_released_for_the_child(tmp_path):
 def _rust_cache(tmp_path, monkeypatch, **kw):
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    from planfetch.planfetch_rs import RustS3Cache
+    from planfetch.planfetch_rs import RustS3Cache  # type: ignore[unresolved-import]
 
     return RustS3Cache(str(tmp_path / "cache"), 4, **kw)
 
