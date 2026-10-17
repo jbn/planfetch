@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import random
-import tempfile
 import time
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple
@@ -24,6 +23,7 @@ from rich.progress import (
 from rich.table import Table
 
 from .cache import SharedDiskCache
+from .dataloader import PrefetchCoordinator
 from .plans import (
     PlanProvider,
     PlanView,
@@ -151,8 +151,9 @@ def cli() -> None:
 @click.option(
     "--cache-dir",
     type=click.Path(),
-    default=None,
-    help="Local cache directory (default: temp dir)",
+    required=True,
+    help="Local cache directory on the disk you will train from (e.g. NVMe). "
+    "Required: a temp dir on the root volume would measure the wrong disk.",
 )
 @click.option(
     "--max-bytes",
@@ -177,7 +178,10 @@ def cli() -> None:
     "--batches-back", type=int, default=4, help="Batches to keep behind current"
 )
 @click.option(
-    "--prune-every", type=int, default=5, help="Prune frequency (every N batches)"
+    "--prune-every",
+    type=int,
+    default=0,
+    help="Full prune sweep every N batches (0 = off; per-step eviction is always on)",
 )
 @click.option(
     "--prune-mode",
@@ -188,8 +192,19 @@ def cli() -> None:
 @click.option(
     "--prune-backend",
     type=click.Choice(["meta", "scan"]),
-    default="meta",
-    help="Prune backend",
+    default="scan",
+    help="Prune backend for the sweep",
+)
+@click.option(
+    "--rust/--no-rust",
+    "use_rust",
+    default=True,
+    help="Use the Rust downloader when built (default) or force the boto3 backend",
+)
+@click.option(
+    "--read-files/--no-read-files",
+    default=True,
+    help="Read each file's bytes after fetch (what training does) instead of only stat()",
 )
 # Plan strategy
 @click.option(
@@ -209,7 +224,7 @@ def speedtest(
     s3_uri_col: str,
     class_col: str,
     batch_size: int,
-    cache_dir: Optional[str],
+    cache_dir: str,
     max_bytes: int,
     download_threads: int,
     s3_pool_connections: int,
@@ -218,6 +233,8 @@ def speedtest(
     prune_every: int,
     prune_mode: str,
     prune_backend: str,
+    use_rust: bool,
+    read_files: bool,
     strategy: str,
     verbose: bool,
     seed: int,
@@ -227,7 +244,9 @@ def speedtest(
 
     Loads a CSV of S3 URIs and measures batched fetch performance with
     configurable prefetching parameters. Use this to find optimal settings
-    before training on GPUs.
+    before training on GPUs. The loop is the same PrefetchCoordinator a
+    training job uses, so coordinator overhead is reported separately from
+    fetch wait.
     """
     # Load CSV
     console.print("[bold blue]Loading CSV...[/bold blue]")
@@ -248,21 +267,16 @@ def speedtest(
     console.print(f"[green]Loaded {n:,} samples[/green]")
 
     # Setup cache
-    if cache_dir is None:
-        tmp_dir = tempfile.mkdtemp(prefix="planfetch_speedtest_")
-        cache_dir = tmp_dir
-        console.print(f"[dim]Using temp cache: {cache_dir}[/dim]")
-    else:
-        tmp_dir = None
-        console.print(f"[dim]Using cache: {cache_dir}[/dim]")
-
+    console.print(f"[dim]Using cache: {cache_dir}[/dim]")
     cache = SharedDiskCache(
-        cache_dir=cache_dir,
+        cache_dir,
         max_bytes=max_bytes,
         download_threads=download_threads,
         s3_max_pool_connections=s3_pool_connections,
         verbose=verbose,
+        use_rust=use_rust,
     )
+    backend = "rust" if getattr(cache, "_use_rust", False) else "python (boto3)"
 
     # Create plan
     console.print(f"[bold blue]Creating {strategy} plan...[/bold blue]")
@@ -280,6 +294,7 @@ def speedtest(
     config_table.add_row("Batch size", str(batch_size))
     config_table.add_row("Num batches", f"{num_batches:,}")
     config_table.add_row("Strategy", strategy)
+    config_table.add_row("Backend", backend)
     config_table.add_row("Download threads", str(download_threads))
     config_table.add_row("Batches ahead", str(batches_ahead))
     config_table.add_row("Batches back", str(batches_back))
@@ -290,7 +305,20 @@ def speedtest(
     console.print()
 
     # Run benchmark
+    coordinator = PrefetchCoordinator(
+        cache,
+        s3_uris,
+        batches_ahead=batches_ahead,
+        batches_back=batches_back,
+        prune_every=prune_every,
+        prune_mode=prune_mode,
+        prune_backend=prune_backend,
+    )
+    coordinator.set_plan(plan)
+
     batch_times: List[float] = []
+    file_times: List[float] = []
+    coord_times: List[float] = []
     total_bytes = 0
     wall_start = time.perf_counter()
 
@@ -306,43 +334,34 @@ def speedtest(
         task = progress.add_task("[cyan]Fetching batches...", total=num_batches)
 
         # Prime initial prefetch window
-        initial_window = plan.range_flat(0, batches_ahead)
-        initial_uris = [s3_uris[int(i)] for i in initial_window]
-        cache.prime_prefetch(initial_uris)
+        t0 = time.perf_counter()
+        coordinator.prime()
+        coord_times.append(time.perf_counter() - t0)
 
         for batch_idx in range(num_batches):
             batch_start = time.perf_counter()
 
-            # Get batch indices
-            batch_indices = plan.batch(batch_idx)
-            batch_uris = [s3_uris[int(i)] for i in batch_indices]
-
-            # Ensure all files are local (blocking)
-            for uri in batch_uris:
+            # Ensure all files are local (blocking), timing each file
+            for i in plan.batch(batch_idx):
+                uri = s3_uris[int(i)]
+                f0 = time.perf_counter()
                 path = cache.ensure_local(uri)
-                try:
-                    total_bytes += Path(path).stat().st_size
-                except Exception:
-                    pass
+                if read_files:
+                    with open(path, "rb") as fh:
+                        total_bytes += len(fh.read())
+                else:
+                    try:
+                        total_bytes += Path(path).stat().st_size
+                    except OSError:
+                        pass
+                file_times.append(time.perf_counter() - f0)
 
             batch_end = time.perf_counter()
             batch_times.append(batch_end - batch_start)
 
-            # Prefetch next window
-            prefetch_start = batch_idx + 1
-            prefetch_end = batch_idx + 1 + batches_ahead
-            if prefetch_end <= num_batches:
-                prefetch_indices = plan.range_flat(prefetch_start, prefetch_end)
-                prefetch_uris = [s3_uris[int(i)] for i in prefetch_indices]
-                cache.prime_prefetch(prefetch_uris)
-
-            # Prune periodically
-            if batch_idx > 0 and batch_idx % prune_every == 0:
-                keep_start = max(0, batch_idx - batches_back)
-                keep_end = min(num_batches, batch_idx + batches_ahead)
-                keep_indices = plan.range_flat(keep_start, keep_end)
-                keep_uris = [s3_uris[int(i)] for i in keep_indices]
-                cache.prune(keep_uris=keep_uris, mode=prune_mode, backend=prune_backend)
+            # Advance the window: prime the entering batch, drop the leaving one
+            coordinator.on_batch_yielded(batch_idx)
+            coord_times.append(time.perf_counter() - batch_end)
 
             progress.update(task, advance=1)
 
@@ -352,13 +371,13 @@ def speedtest(
     wall_time = wall_end - wall_start
 
     # Compute statistics using wall-clock time (actual throughput)
-    batch_times_arr = np.array(batch_times)
-    avg_batch_wait = batch_times_arr.mean()
-    p50_wait = np.percentile(batch_times_arr, 50)
-    p95_wait = np.percentile(batch_times_arr, 95)
-    p99_wait = np.percentile(batch_times_arr, 99)
+    batch_arr = np.array(batch_times) * 1000.0
+    file_arr = np.array(file_times) * 1000.0
+    coord_arr = np.array(coord_times) * 1000.0
     batches_per_sec = num_batches / wall_time if wall_time > 0 else 0
     samples_per_sec = (num_batches * batch_size) / wall_time if wall_time > 0 else 0
+    coord_per_batch = float(coord_arr[1:].mean()) if len(coord_arr) > 1 else 0.0
+    stats = cache.stats()
 
     # Display results
     console.print()
@@ -368,17 +387,35 @@ def speedtest(
     results_table.add_row("Total time", f"{wall_time:.2f} s")
     results_table.add_row("Batches/sec", f"{batches_per_sec:.2f}")
     results_table.add_row("Samples/sec", f"{samples_per_sec:.2f}")
-    results_table.add_row("Avg batch wait", f"{avg_batch_wait * 1000:.2f} ms")
-    results_table.add_row("P50 batch wait", f"{p50_wait * 1000:.2f} ms")
-    results_table.add_row("P95 batch wait", f"{p95_wait * 1000:.2f} ms")
-    results_table.add_row("P99 batch wait", f"{p99_wait * 1000:.2f} ms")
-    results_table.add_row("Total downloaded", f"{total_bytes / 1e9:.2f} GB")
+    results_table.add_row("Throughput", f"{total_bytes / wall_time / 1e6:.1f} MB/s")
+    results_table.add_row("Avg batch wait", f"{batch_arr.mean():.2f} ms")
+    results_table.add_row("P50 batch wait", f"{np.percentile(batch_arr, 50):.2f} ms")
+    results_table.add_row("P95 batch wait", f"{np.percentile(batch_arr, 95):.2f} ms")
+    results_table.add_row("P99 batch wait", f"{np.percentile(batch_arr, 99):.2f} ms")
+    results_table.add_row("P50 file wait", f"{np.percentile(file_arr, 50):.3f} ms")
+    results_table.add_row("P95 file wait", f"{np.percentile(file_arr, 95):.3f} ms")
+    results_table.add_row("P99 file wait", f"{np.percentile(file_arr, 99):.3f} ms")
+    results_table.add_row("Coordinator / batch", f"{coord_per_batch:.2f} ms")
+    results_table.add_row("Total downloaded", _fmt_bytes(total_bytes))
+    results_table.add_row("S3 GET attempts", f"{stats.get('attempts', 0):,}")
+    results_table.add_row("Retries", f"{stats.get('retries', 0):,}")
+    results_table.add_row("Throttled (503)", f"{stats.get('throttled', 0):,}")
+    results_table.add_row("Failures", f"{stats.get('failures', 0):,}")
     console.print(results_table)
+    if stats.get("retries", 0) or stats.get("throttled", 0):
+        console.print(
+            "[yellow]S3 retried or throttled requests: slow batches above may be "
+            "backoff, not S3 latency. Spread keys over more prefixes or lower "
+            "--download-threads.[/yellow]"
+        )
 
-    # Cleanup temp dir info
-    if tmp_dir:
-        console.print(f"\n[dim]Temp cache at: {tmp_dir}[/dim]")
-        console.print("[dim]Run with --cache-dir to persist cache[/dim]")
+
+def _fmt_bytes(n: int) -> str:
+    if n >= 1e9:
+        return f"{n / 1e9:.2f} GB"
+    if n >= 1e6:
+        return f"{n / 1e6:.2f} MB"
+    return f"{n / 1e3:.2f} KB"
 
 
 if __name__ == "__main__":

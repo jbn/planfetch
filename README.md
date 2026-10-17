@@ -209,16 +209,24 @@ train_loader, train_controller = pf.build_prefetching_dataloader(
     plan_provider=plan_provider,
     cache=cache,
     num_workers=8,
-    batches_ahead=200,
+    batches_ahead=200,   # must exceed num_workers * prefetch_factor (8 * 2 = 16)
     batches_back=4,
-    prune_every=10,
-    prune_mode="window",
-    # With num_workers>0, scan pruning is most robust across processes:
-    prune_backend="scan",
     persistent_workers=True,
     pin_memory=True,
 )
 ```
+
+Per step the coordinator primes the one batch entering the window and unlinks the one
+batch leaving it, so its cost is a few milliseconds regardless of `batches_ahead`.
+`prune_every` (default 0, off) adds a full cache sweep every N batches; it walks the whole
+cache directory, so if you enable it keep N large (hundreds of batches) or use it at epoch
+boundaries only.
+
+The cache object is shared with DataLoader workers as-is. It rebuilds its download backend
+(the Rust tokio runtime, or the boto3 client and thread pool) per process on first use, so
+`fork` and `spawn` workers both work without a `worker_init_fn`. `batches_ahead` must be
+larger than `num_workers * prefetch_factor`; otherwise workers read batches the window has
+already dropped, and `build_prefetching_dataloader` raises.
 
 ### 6) Training loop (minimal intrusion)
 ```python
@@ -291,8 +299,9 @@ prefetch = pf.PrefetchCoordinator(
     s3_uris=train_uris,
     batches_ahead=200,   # prefetch 200 batches ahead of current position
     batches_back=10,     # keep 10 batches behind (for stragglers)
-    prune_every=5,       # clean up old files every 5 batches
 )
+# Files leaving the window are unlinked every step; no periodic sweep is needed.
+prefetch.check_loader_depth(num_workers=8)  # batches_ahead must exceed workers * prefetch_factor
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 4: Standard PyTorch DataLoader
@@ -367,9 +376,6 @@ val_loader, val_controller = pf.build_prefetching_dataloader(
     num_workers=4,
     batches_ahead=50,
     batches_back=2,
-    prune_every=20,
-    prune_mode="window",
-    prune_backend="scan",
 )
 
 val_controller.set_epoch(0)
@@ -478,7 +484,9 @@ Good starting knobs:
 - `batches_back`: 4
 - `download_threads`: 64 (try 128 if the network + S3 can sustain)
 - `max_bytes`: 70–85% of NVMe
-- `prune_backend`: `"scan"` when `num_workers > 0` for correctness on shared disk
+- `prune_every`: 0 (per-step eviction handles the window; a sweep only catches orphans)
+- `max_bytes`: only enforced in `prune_mode="pressure"`; in `window` mode the cap is the window
+  itself, about `(batches_ahead + batches_back) * batch_size * mean_file_size`
 
 ---
 
@@ -493,8 +501,11 @@ planfetch speedtest <csv_path> [OPTIONS]
 ### Quick examples
 
 ```bash
-# Quick test with 1000 samples
-planfetch speedtest data.csv --limit 1000 --batch-size 32
+# Quick test with 1000 samples (the cache dir is required: put it on the NVMe you train from)
+planfetch speedtest data.csv --limit 1000 --batch-size 32 --cache-dir /mnt/nvme/cache
+
+# Compare the boto3 backend with the Rust one
+planfetch speedtest data.csv --limit 1000 --cache-dir /mnt/nvme/cache --no-rust
 
 # Tune prefetch settings
 planfetch speedtest data.csv \
@@ -514,24 +525,28 @@ planfetch speedtest data.csv \
 | `--s3-uri-col` | `s3_uri` | Column name for S3 URIs |
 | `--class-col` | `label` | Column name for class labels |
 | `--batch-size` | 64 | Batch size |
-| `--cache-dir` | temp | Local cache directory |
+| `--cache-dir` | required | Local cache directory (use the disk you train from) |
 | `--max-bytes` | 10GB | Maximum cache size |
 | `--download-threads` | 64 | Number of download threads |
 | `--s3-pool-connections` | 256 | Boto3 connection pool size |
 | `--batches-ahead` | 200 | Batches to prefetch ahead |
 | `--batches-back` | 4 | Batches to keep behind |
-| `--prune-every` | 5 | Prune frequency (every N batches) |
+| `--prune-every` | 0 | Full prune sweep every N batches (0 = off) |
 | `--prune-mode` | window | `window` or `pressure` |
-| `--prune-backend` | meta | `meta` or `scan` |
+| `--prune-backend` | scan | `meta` or `scan` |
+| `--rust/--no-rust` | rust | Use the Rust downloader, or force boto3 |
+| `--read-files/--no-read-files` | read | Read each file's bytes (as training would) or only stat |
 | `--strategy` | shuffle | `shuffle`, `sequential`, or `stratified` |
 | `-v, --verbose` | - | Verbose output |
 
 ### Output
 
-The speedtest displays a rich progress bar and reports:
-- Total time, batches/sec, samples/sec
-- Avg/P50/P95/P99 batch latency
-- Total bytes downloaded
+The speedtest runs the same `PrefetchCoordinator` a training job uses and reports:
+- Total time, batches/sec, samples/sec, MB/s
+- Avg/P50/P95/P99 batch wait and P50/P95/P99 per-file wait
+- Coordinator time per batch (what the training thread pays for prefetching)
+- Total bytes downloaded, S3 GET attempts, retries, throttles (503 SlowDown) and failures.
+  Non-zero retries or throttles mean slow batches are backoff, not S3 latency.
 
 ---
 
@@ -636,7 +651,9 @@ else:
 - **Semaphore-limited concurrency**: Configurable via `download_threads`
 - **Inflight deduplication**: Won't re-download the same file if already in progress
 - **Atomic writes**: Downloads to temp file, then renames
-- **Exponential backoff retries**: Up to 6 attempts per file
+- **Exponential backoff retries**: Up to 6 attempts per file, body-read failures included
+- **Counters**: `cache.stats()` returns attempts, retries, throttled, failures, downloaded, bytes, inflight
+- **GIL released** while blocked on S3, so other Python threads keep running
 
 ### Building from source
 
