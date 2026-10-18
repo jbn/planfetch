@@ -1540,6 +1540,7 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
+ "aws-smithy-runtime-api",
  "dashmap",
  "futures",
  "hex",

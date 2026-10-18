@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -12,6 +14,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import boto3
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
 from concurrent.futures import Future, ThreadPoolExecutor
 from filelock import FileLock
 
@@ -62,16 +65,99 @@ def parse_s3_uri(uri: str) -> Tuple[str, str]:
     return bucket, key
 
 
+class S3TerminalError(RuntimeError):
+    """
+    A GET that must not be retried: the object or bucket does not exist, we are
+    not allowed to read it, or S3 rejected the request (any other 4xx).
+    Carries `uri`, `code` (S3 error code) and `status` (HTTP status, 0 if unknown).
+    """
+
+    def __init__(self, uri: str, code: str, status: int, message: Optional[str] = None):
+        self.uri = uri
+        self.code = code
+        self.status = int(status)
+        super().__init__(message or f"{code} ({status}): {uri}")
+
+
+class S3ObjectMissing(S3TerminalError):
+    """NoSuchKey / NoSuchBucket / 404."""
+
+
+class S3AccessDenied(S3TerminalError):
+    """AccessDenied / 403."""
+
+
+_TERMINAL_BY_TAG = {
+    "NotFound": S3ObjectMissing,
+    "Forbidden": S3AccessDenied,
+    "ClientError": S3TerminalError,
+}
+# "NotFound: NoSuchKey (404): s3://bucket/key", as the Rust backend formats it.
+_RUST_TERMINAL_RE = re.compile(
+    r"^(NotFound|Forbidden|ClientError): (\S+) \((\d+)\): (s3://.*)$"
+)
+
+_NOT_FOUND_CODES = frozenset({"NoSuchKey", "NoSuchBucket", "NotFound", "404"})
+_FORBIDDEN_CODES = frozenset(
+    {
+        "AccessDenied",
+        "InvalidAccessKeyId",
+        "SignatureDoesNotMatch",
+        "ExpiredToken",
+        "403",
+    }
+)
+_THROTTLE_CODES = frozenset(
+    {"SlowDown", "Throttling", "RequestLimitExceeded", "503", "429"}
+)
+
+
+def _classify_boto_error(e: BaseException) -> Tuple[str, str, int]:
+    """
+    Map a boto3 exception to (class, code, status). class is one of
+    "retry", "throttled", "not_found", "forbidden", "client".
+    """
+    if isinstance(e, ClientError):
+        err = e.response.get("Error", {}) if hasattr(e, "response") else {}
+        code = str(err.get("Code", ""))
+        status = int(
+            e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0) or 0
+        )
+        if code in _NOT_FOUND_CODES or status == 404:
+            return "not_found", code or "HTTP404", status
+        if code in _FORBIDDEN_CODES or status == 403:
+            return "forbidden", code or "HTTP403", status
+        if code in _THROTTLE_CODES or status in (503, 429):
+            return "throttled", code or f"HTTP{status}", status
+        if 400 <= status < 500:
+            return "client", code or f"HTTP{status}", status
+        return "retry", code or type(e).__name__, status
+    msg = repr(e)
+    if "SlowDown" in msg or "503" in msg or "Throttl" in msg:
+        return "throttled", "SlowDown", 503
+    return "retry", type(e).__name__, 0
+
+
+def _rust_error(e: BaseException, uri: str) -> BaseException:
+    """Turn the Rust backend's tagged RuntimeError into a typed exception."""
+    m = _RUST_TERMINAL_RE.match(str(e))
+    if m is None:
+        return e
+    cls = _TERMINAL_BY_TAG[m.group(1)]
+    return cls(m.group(4) or uri, m.group(2), int(m.group(3)), str(e))
+
+
 STAT_KEYS = (
     "attempts",
     "retries",
     "throttled",
     "failures",
+    "not_found",
     "downloaded",
     "bytes",
 )
 
-_INTERNAL_DIRS = frozenset({"_tmp", "_locks"})
+_INTERNAL_DIRS = frozenset({"_tmp", "_locks", "_stats"})
 
 # Attributes that hold per-process state (thread pool, tokio runtime, locks).
 # They are rebuilt lazily in whichever process first uses the cache after a
@@ -88,6 +174,9 @@ _RUNTIME_ATTRS = (
     "_total_bytes",
     "_py_stats",
     "_py_stats_lock",
+    "_drop_queue",
+    "_drop_thread",
+    "_last_stats_dump",
 )
 
 
@@ -117,8 +206,21 @@ class SharedDiskCache:
       use, so DataLoader workers that inherit or unpickle the cache get their
       own. A user-supplied `s3_client` is reused as-is and must itself be
       fork-safe or picklable.
+    - A process other than the one that built the cache (a DataLoader worker)
+      gets a smaller backend: `worker_download_threads` threads and, for Rust,
+      a `worker_runtime_threads`-thread tokio runtime. Workers mostly wait for
+      the parent's prefetch (`wait_local`) and rarely download.
     - In-memory metadata is per process. For a global sweep across processes,
       use prune_backend="scan" (filesystem scan).
+    - Counters are per process. Every process writes its counters to
+      `<cache_dir>/_stats/<pid>.json` after a download (at most once per
+      `stats_dump_interval` seconds); `stats(all_processes=True)` sums them.
+
+    Errors:
+    - A key that does not exist (NoSuchKey / 404) raises `S3ObjectMissing` on
+      the first attempt; AccessDenied / 403 raises `S3AccessDenied`; any other
+      4xx raises `S3TerminalError`. None of these are retried. 5xx, SlowDown
+      and connection errors are retried 6 times with backoff.
     """
 
     def __init__(
@@ -133,11 +235,23 @@ class SharedDiskCache:
         verbose: bool = False,
         use_rust: bool = True,
         retry_backoff_seconds: float = 0.25,
+        worker_download_threads: int = 8,
+        worker_runtime_threads: Optional[int] = 2,
+        stats_dump_interval: float = 2.0,
     ):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         (self.cache_dir / "_tmp").mkdir(exist_ok=True)
         (self.cache_dir / "_locks").mkdir(exist_ok=True)
+        stats_dir = self.cache_dir / "_stats"
+        stats_dir.mkdir(exist_ok=True)
+        # Only the constructing process gets here (workers inherit or unpickle),
+        # so dumps from an earlier run do not leak into this run's totals.
+        for old in stats_dir.glob("*.json"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
 
         self.max_bytes = int(max_bytes)
         self.min_age_seconds_before_delete = float(min_age_seconds_before_delete)
@@ -145,8 +259,14 @@ class SharedDiskCache:
         self.retry_backoff_seconds = float(retry_backoff_seconds)
 
         self._download_threads = int(download_threads)
+        self._worker_download_threads = int(worker_download_threads)
+        self._worker_runtime_threads = (
+            int(worker_runtime_threads) if worker_runtime_threads is not None else None
+        )
+        self._stats_dump_interval = float(stats_dump_interval)
         self._s3_max_pool_connections = int(s3_max_pool_connections)
         self._user_s3_client = s3_client
+        self._owner_pid = os.getpid()
 
         # Use Rust backend if available and requested, but not if a custom s3_client is provided
         # (Rust uses its own AWS SDK client)
@@ -159,11 +279,21 @@ class SharedDiskCache:
     # Per-process backend lifecycle
     # ------------------------------------------------------------------ #
 
+    def _is_worker(self) -> bool:
+        """True in any process other than the one that constructed the cache."""
+        return os.getpid() != getattr(self, "_owner_pid", os.getpid())
+
     def _init_backend(self) -> None:
         """Create the download backend and bookkeeping for the current process."""
         self._pid = os.getpid()
+        worker = self._is_worker()
+        threads = self._worker_download_threads if worker else self._download_threads
         if self._use_rust:
-            self._rust_cache = RustS3Cache(str(self.cache_dir), self._download_threads)
+            self._rust_cache = RustS3Cache(
+                str(self.cache_dir),
+                threads,
+                self._worker_runtime_threads if worker else None,
+            )
         else:
             s3_client = self._user_s3_client
             if s3_client is None:
@@ -171,9 +301,14 @@ class SharedDiskCache:
                 s3_client = boto3.client("s3", config=cfg)
             self.s3 = s3_client
 
-            self._pool = ThreadPoolExecutor(max_workers=self._download_threads)
+            self._pool = ThreadPoolExecutor(max_workers=threads)
             self._inflight: Dict[str, Future] = {}
             self._inflight_lock = threading.Lock()
+        self._drop_queue: Optional[Any] = (
+            None  # built lazily by drop_async (Python backend)
+        )
+        self._drop_thread: Optional[threading.Thread] = None
+        self._last_stats_dump = 0.0
 
         self._meta: Dict[str, CacheMeta] = {}
         self._meta_lock = threading.Lock()
@@ -208,22 +343,73 @@ class SharedDiskCache:
         with self._py_stats_lock:
             self._py_stats[key] += n
 
-    def stats(self) -> Dict[str, int]:
+    def stats(self, all_processes: bool = False) -> Dict[str, int]:
         """
-        Download counters for this process's backend.
+        Download counters.
 
-        Keys: attempts, retries, throttled, failures, downloaded, bytes, inflight.
-        A non-zero `throttled` or `retries` means S3 is pushing back (503 SlowDown)
-        and what looks like slow S3 is really retry backoff.
+        Keys: attempts, retries, throttled, failures, not_found, downloaded,
+        bytes, inflight. A non-zero `throttled` or `retries` means S3 is pushing
+        back (503 SlowDown) and what looks like slow S3 is really retry backoff.
+        `not_found` counts keys S3 said do not exist (also in `failures`).
+
+        all_processes=False: this process's backend only.
+        all_processes=True: this process's live counters plus the last dump of
+        every other process under `<cache_dir>/_stats/` (DataLoader workers write
+        one after each download), with an extra key `processes`.
         """
         self._ensure_backend()
         if self._use_rust:
-            return dict(self._rust_cache.stats())
-        with self._py_stats_lock:
-            out = dict(self._py_stats)
-        with self._inflight_lock:
-            out["inflight"] = len(self._inflight)
-        return out
+            local = dict(self._rust_cache.stats())
+        else:
+            with self._py_stats_lock:
+                local = dict(self._py_stats)
+            with self._inflight_lock:
+                local["inflight"] = len(self._inflight)
+        if not all_processes:
+            return local
+
+        total = dict(local)
+        processes = 1
+        me = os.getpid()
+        for f in (self.cache_dir / "_stats").glob("*.json"):
+            try:
+                d = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            if int(d.get("pid", -1)) == me:
+                continue  # live counters above are newer than our own dump
+            processes += 1
+            for k in local:
+                total[k] += int(d.get(k, 0))
+        total["processes"] = processes
+        return total
+
+    def dump_stats(self) -> str:
+        """Write this process's counters to `<cache_dir>/_stats/<pid>.json`; returns the path."""
+        self._ensure_backend()
+        path = self.cache_dir / "_stats" / f"{os.getpid()}.json"
+        if self._use_rust:
+            self._rust_cache.stats_dump(str(path))
+        else:
+            d = self.stats()
+            d["pid"] = os.getpid()
+            tmp = path.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(d))
+            os.replace(tmp, path)
+        self._last_stats_dump = time.monotonic()
+        return str(path)
+
+    def _maybe_dump_stats(self) -> None:
+        """Dump after a download, at most once per `stats_dump_interval` seconds.
+
+        DataLoader workers end with os._exit, so an atexit hook never runs there;
+        dumping on the download path is what leaves their counters behind."""
+        now = time.monotonic()
+        if now - self._last_stats_dump >= self._stats_dump_interval:
+            try:
+                self.dump_stats()
+            except OSError as e:
+                self._log(f"stats dump failed: {e}")
 
     def _submit_if_absent(self, key: str, s3_uri: str) -> Future:
         """
@@ -303,26 +489,49 @@ class SharedDiskCache:
         Blocks until the file is present.
         """
         self._ensure_backend()
-        if self._use_rust:
-            path = self._rust_cache.ensure_local(s3_uri)
-            self._touch(s3_uri, Path(path))
-            return path
-
         dst = self._path_for(s3_uri)
         if dst.exists():
             self._touch(s3_uri, dst)
             return str(dst)
 
+        if self._use_rust:
+            try:
+                path = self._rust_cache.ensure_local(s3_uri)
+            except RuntimeError as e:
+                self._maybe_dump_stats()
+                raise _rust_error(e, s3_uri) from None
+            self._touch(s3_uri, Path(path))
+            self._maybe_dump_stats()
+            return path
+
         key = _sha256_hex(s3_uri)
         fut = self._submit_if_absent(key, s3_uri)
 
         # Wait for completion (may raise)
-        path = fut.result()
-
-        # Best-effort cleanup (callback usually handles it)
-        with self._inflight_lock:
-            self._inflight.pop(key, None)
+        try:
+            path = fut.result()
+        finally:
+            # Best-effort cleanup (callback usually handles it)
+            with self._inflight_lock:
+                self._inflight.pop(key, None)
+            self._maybe_dump_stats()
         return path
+
+    def wait_local(self, s3_uri: str, timeout: float) -> bool:
+        """
+        Block until the cached file for `s3_uri` exists or `timeout` seconds pass.
+        Never downloads and needs no backend, so a forked worker can wait for the
+        parent's prefetch without building a runtime of its own. Returns True when
+        the file is there.
+        """
+        dst = self._path_for(s3_uri)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            if dst.exists():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.005)
 
     def prime_prefetch(self, s3_uris: Sequence[str]) -> None:
         """
@@ -353,7 +562,7 @@ class SharedDiskCache:
             with self._inflight_lock:
                 futs = list(self._inflight.values())
             if not futs:
-                return
+                break
             for f in futs:
                 try:
                     f.result()
@@ -361,6 +570,8 @@ class SharedDiskCache:
                     if raise_errors:
                         raise
             time.sleep(0.01)
+        if self._drop_queue is not None:
+            self._drop_queue.join()
 
     def _download_if_needed(self, s3_uri: str) -> str:
         dst = self._path_for(s3_uri)
@@ -381,6 +592,7 @@ class SharedDiskCache:
             )
 
             backoff = self.retry_backoff_seconds
+            last = ""
             for attempt in range(6):
                 try:
                     self._bump("attempts")
@@ -401,24 +613,34 @@ class SharedDiskCache:
                     self._touch(s3_uri, dst)
                     return str(dst)
                 except Exception as e:
-                    msg = repr(e)
-                    if "SlowDown" in msg or "503" in msg or "Throttl" in msg:
-                        self._bump("throttled")
-                    if attempt == 5:
-                        self._bump("failures")
-                    else:
-                        self._bump("retries")
-                    self._log(f"download failed attempt {attempt+1}: {s3_uri} -> {e}")
                     try:
                         if tmp.exists():
                             tmp.unlink()
                     except Exception:
                         pass
+                    klass, code, status = _classify_boto_error(e)
+                    last = f"{code} ({status})"
+                    if klass == "throttled":
+                        self._bump("throttled")
+                    elif klass in ("not_found", "forbidden", "client"):
+                        # Terminal: S3 gave a definite answer, retrying cannot help.
+                        self._bump("failures")
+                        if klass == "not_found":
+                            self._bump("not_found")
+                            raise S3ObjectMissing(s3_uri, code, status) from e
+                        if klass == "forbidden":
+                            raise S3AccessDenied(s3_uri, code, status) from e
+                        raise S3TerminalError(s3_uri, code, status) from e
+                    if attempt == 5:
+                        self._bump("failures")
+                    else:
+                        self._bump("retries")
+                    self._log(f"download failed attempt {attempt+1}: {s3_uri} -> {e}")
                     if attempt < 5 and backoff > 0:
                         time.sleep(backoff)
                     backoff *= 2.0
 
-            raise RuntimeError(f"Failed to download after retries: {s3_uri}")
+            raise RuntimeError(f"Failed to download after retries: {s3_uri}: {last}")
 
     # ------------------------------------------------------------------ #
     # Eviction
@@ -452,6 +674,51 @@ class SharedDiskCache:
                 continue
             self._forget(h)
         return removed
+
+    def drop_async(self, s3_uris: Sequence[str]) -> None:
+        """
+        Unlink the cached files for `s3_uris` off the calling thread; returns at
+        once. This is what PrefetchCoordinator uses per step so eviction does not
+        cost training-thread time. `wait_for_inflight()` waits for pending
+        unlinks too. Missing files are ignored.
+        """
+        self._ensure_backend()
+        uris = list(s3_uris)
+        if not uris:
+            return
+        for uri in uris:
+            self._forget(_sha256_hex(uri))
+        if self._use_rust:
+            self._rust_cache.drop_paths(uris)
+            return
+        with self._inflight_lock:
+            uris = [u for u in uris if _sha256_hex(u) not in self._inflight]
+        if self._drop_queue is None:
+            import queue
+
+            self._drop_queue = queue.Queue()
+            t = threading.Thread(
+                target=self._drop_worker, name="planfetch-drop", daemon=True
+            )
+            self._drop_thread = t
+            t.start()
+        self._drop_queue.put([self._path_for(u) for u in uris])
+
+    def _drop_worker(self) -> None:
+        q = self._drop_queue
+        assert q is not None
+        while True:
+            paths = q.get()
+            try:
+                for p in paths:
+                    try:
+                        os.unlink(p)
+                    except FileNotFoundError:
+                        pass
+                    except Exception as e:
+                        self._log(f"drop failed: {p} -> {e}")
+            finally:
+                q.task_done()
 
     def prune(
         self,

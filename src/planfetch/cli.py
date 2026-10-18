@@ -34,6 +34,9 @@ from .plans import (
 
 console = Console()
 
+# Above this the training thread is paying for prefetch bookkeeping it should not see.
+COORDINATOR_WARN_MS = 5.0
+
 
 def load_csv_subset(
     csv_path: str,
@@ -199,7 +202,9 @@ def cli() -> None:
     "--rust/--no-rust",
     "use_rust",
     default=True,
-    help="Use the Rust downloader when built (default) or force the boto3 backend",
+    help="Use the Rust downloader when built (default). --no-rust forces the boto3 "
+    "backend, a diagnostic fallback: its download threads hold the GIL and starve "
+    "the training thread, so its numbers are not what a training loop would see",
 )
 @click.option(
     "--read-files/--no-read-files",
@@ -401,12 +406,25 @@ def speedtest(
     results_table.add_row("Retries", f"{stats.get('retries', 0):,}")
     results_table.add_row("Throttled (503)", f"{stats.get('throttled', 0):,}")
     results_table.add_row("Failures", f"{stats.get('failures', 0):,}")
+    results_table.add_row("Not found", f"{stats.get('not_found', 0):,}")
     console.print(results_table)
     if stats.get("retries", 0) or stats.get("throttled", 0):
         console.print(
             "[yellow]S3 retried or throttled requests: slow batches above may be "
             "backoff, not S3 latency. Spread keys over more prefixes or lower "
             "--download-threads.[/yellow]"
+        )
+    if stats.get("not_found", 0):
+        console.print(
+            "[yellow]Some keys do not exist in S3: fix the index, or give "
+            "S3PathDataset an on_error handler so training skips them.[/yellow]"
+        )
+    if coord_per_batch > COORDINATOR_WARN_MS:
+        console.print(
+            f"[yellow]Coordinator time is {coord_per_batch:.1f} ms per batch "
+            f"(expected under {COORDINATOR_WARN_MS:g} ms). On the boto3 backend this is "
+            "GIL starvation by the download threads; on the Rust backend check the disk "
+            "the cache is on.[/yellow]"
         )
 
 
